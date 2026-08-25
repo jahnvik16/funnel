@@ -414,3 +414,113 @@ distributing the two links differently (e.g. one per bio-link placement), not by
 FunnelCore computes or randomizes. No p-value, confidence interval, or "declare a winner"
 affordance exists anywhere in the admin UI; `successMetric` (D031) is the closest thing to a
 comparison aid, and it is deliberately inert beyond a label.
+
+---
+
+# Production hardening audit (this milestone)
+
+Before this milestone, the full implementation was audited against CLAUDE.md and the
+architecture docs across: security, reliability, data integrity, historical attribution,
+secret handling, error handling, idempotency, observability, performance, and admin usability.
+D034 through D041 are the high-confidence fixes that came out of it — each is a real,
+reproducible bug or gap, not a hypothetical. Items that were reviewed and deliberately left
+alone (either because they're already-accepted V1 tradeoffs or because fixing them properly
+would require real new architecture the brief explicitly said not to add) are recorded in
+OPEN_QUESTIONS.md instead of here, since they weren't decisions to change anything.
+
+## D034 — `writeFunnelEvent` is now safe under genuine concurrency, not just sequential retries
+**Date:** 2026-08-25
+D020 fixed a *sequential* duplicate (the client re-issuing `/out` before the first response
+landed) with a check-then-write guard (`hasFunnelEvent` then `writeFunnelEvent`). That guard is
+not atomic: two truly concurrent requests for the same click — the realistic case is Telegram
+redelivering a webhook update while the first delivery is still mid-flight — can both read "no
+event yet" before either commits, producing two rows for a step that must only ever happen once
+(`AGE_GATE_ACCEPTED`, `AGE_GATE_DECLINED`, `TELEGRAM_STARTED`, `OUTBOUND_PAYBIG_REDIRECTED`).
+That's a direct hit to attribution correctness — exactly the class of bug this audit was told to
+find. Fixed at the database level: a partial unique index on `(clickId, stepType)` for those
+four step types (migration `20260825200000_funnel_event_singleton_steps` — Prisma's schema DSL
+has no partial-index support, so this is hand-authored, same as D011's precedent), with
+`writeFunnelEvent` catching the resulting `P2002` and treating it as "already recorded," which
+is exactly what every existing caller already wants. `ROUTE_RESOLVED`, `AGE_GATE_SHOWN`, and
+`AGGREGATOR_VIEWED` are intentionally excluded (D020: genuine repeat views, not one-time
+transitions). `AGGREGATOR_CONTINUE_CLICKED` was also left out of this pass on purpose — it has
+the same theoretical race, but no dashboard metric currently reads it, so a duplicate there has
+zero observable impact today; revisit if that changes. Proven under a real concurrent write in
+`public-routing.test.ts`, not just asserted.
+
+## D035 — Telegram webhook secret comparison is now constant-time
+**Date:** 2026-08-25
+`verifyWebhookSecret` used `===` on two strings — a timing side-channel that, in principle,
+lets an attacker recover a webhook secret byte-by-byte by measuring response time across many
+requests. Switched to `crypto.timingSafeEqual`, with an explicit length check first (the
+function throws on mismatched-length buffers, so that check has to happen on the cheap,
+non-secret-dependent property — length — not the content). Low real-world exploitability given
+network jitter, but the fix is free and directly in scope for "webhook verification," one of
+this audit's named focus areas.
+
+## D036 — Login no longer reveals whether an email is registered via response timing
+**Date:** 2026-08-25
+The login action already returned the same generic "Invalid email or password" for a
+nonexistent email, a disabled account, and a wrong password — but only the wrong-password case
+paid bcrypt's ~100ms+ cost; an unknown email returned almost instantly. That's a timing
+side-channel enabling admin-email enumeration. Fixed by always calling `verifyPassword` —
+against a fixed `DUMMY_PASSWORD_HASH` (a real bcrypt hash with no corresponding password) when
+no account matches — so every login attempt pays the same cost regardless of outcome. This does
+not add rate-limiting/lockout (see OPEN_QUESTIONS.md — that's real new architecture, out of
+scope here); it only removes a leak of information the app already claimed not to reveal.
+
+## D037 — Public route hostnames are now compared case-insensitively
+**Date:** 2026-08-25
+`getHostname` returned the request's `Host` header verbatim; `resolveTrackingLinkVersion` looks
+up `Domain.hostname` with an exact-match query, and Postgres text comparison is case-sensitive.
+Hostnames are case-insensitive per RFC 4343, and `Domain.hostname` is already guaranteed
+lowercase (the admin form's validation regex only accepts `[a-z0-9...]`), so the fix is on the
+request side only: lowercase in `getHostname`. Without it, a Host header sent in a different
+case than what happens to be stored (e.g. from a misconfigured client, proxy, or link preview
+crawler) would resolve as `domain_not_found` for a link that genuinely exists — a silent,
+hard-to-diagnose failure on the single highest-traffic route in the system.
+
+## D038 — Paybig CSV import strips a leading UTF-8 BOM before parsing
+**Date:** 2026-08-25
+Excel commonly prepends a UTF-8 BOM to CSV exports. Left in place, it fuses onto the first
+header cell's name (`"﻿conversion_time"` instead of `"conversion_time"`), which meant
+every single row in an otherwise-perfectly-valid file would report that column as missing — a
+systemic, silent, confusing failure with no clear symptom pointing at the actual cause (nothing
+about "every row is invalid" screams "BOM"). `tokenizeCsv` now strips a leading `﻿` before
+tokenizing. Directly in scope for this audit's "malformed CSV" focus area, and a very plausible
+real input given Paybig's export is likely produced by a spreadsheet tool.
+
+## D039 — CSV import rejects files over 10 MB before parsing
+**Date:** 2026-08-25
+`importPaybigCsv` processes rows sequentially with a handful of DB round-trips each — correct
+for the volumes this system has been tested against, but with no upper bound, an arbitrarily
+large upload could tie up the request (and the database) for an unbounded amount of time. A
+flat 10 MB cap (generous for a conversions CSV — see OPEN_QUESTIONS.md for the actual expected
+volume, which is still unknown) rejects oversized files upfront with a clear message rather
+than timing out silently partway through. This is a guardrail, not a solution to the deeper "no
+batching/streaming for very large imports" limitation, which is recorded as an accepted V1 gap
+in OPEN_QUESTIONS.md rather than built out here — a real fix would need background job
+processing, exactly the kind of new architecture this milestone was told not to add.
+
+## D040 — Telegram API calls now time out instead of hanging indefinitely
+**Date:** 2026-08-25
+`callTelegramApi`'s `fetch` call had no timeout. A slow or unreachable Telegram API would hang
+the caller indefinitely — the admin's synchronous "Validate" action would spin forever, and
+worse, the webhook route (which Telegram expects a prompt response from, or it retries) could
+hold the connection open with no bound. Added an 8-second `AbortSignal.timeout()`; a timeout
+surfaces through the existing try/catch as an ordinary `{ok: false, description: "Could not
+reach..."}` result, exactly like any other network failure — no new error-handling path needed.
+
+## D041 — Publish version-number collisions now fail with a retryable message instead of an unhandled crash
+**Date:** 2026-08-25
+`publishTrackingLinkVersion` reads the tracking link's current max `versionNumber`, then creates
+a new version at `max + 1`, as two separate steps inside one transaction. Two publishes for the
+*same* link close enough together (a double-submitted form, or two admins editing the same link)
+can both read the same max before either commits, and the second collides with the existing
+`@@unique([trackingLinkId, versionNumber])` constraint — which is what actually prevents version
+numbers from colliding; nothing changed there. What was missing was handling: the Server Action
+let that `P2002` bubble up as an unhandled 500 instead of a message telling the admin what
+happened. Now caught and returned as "Another version was just published for this link — please
+retry," which succeeds immediately (the retry reads past the just-committed version). Proven
+under a real concurrent publish in `tracking-link-publishing.test.ts` — the underlying
+constraint fires exactly as expected; only the Server Action's response to it changed.

@@ -15,7 +15,12 @@ function tokenizeCsv(content: string): string[][] {
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
-  const text = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Strip a leading UTF-8 BOM — common in Excel-exported CSVs. Left in
+  // place, it silently fuses onto the first header cell's name (e.g.
+  // "﻿conversion_time"), so every row would report that column
+  // "missing" without any obviously-wrong symptom to point at why.
+  const withoutBom = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const text = withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];

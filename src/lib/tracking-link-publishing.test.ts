@@ -11,7 +11,7 @@ try {
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "crypto";
-import { PathType } from "@prisma/client";
+import { PathType, Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { validateTrackingLinkConfig, publishTrackingLinkVersion } from "./tracking-link-publishing";
 
@@ -357,4 +357,68 @@ test("validation accepts an experiment arm whose experiment has no brand restric
   });
 
   assert.equal(result.valid, true);
+});
+
+// publishTrackingLinkVersion reads the current max versionNumber, then
+// creates a new row at max+1, as two separate steps (read, then write) — two
+// truly concurrent publishes of the same link can both read the same max
+// before either commits. The @@unique([trackingLinkId, versionNumber])
+// constraint is what actually prevents two versions from claiming the same
+// number; this proves it fires under a real concurrent race (one publish
+// wins, the other rejects with a unique-constraint violation) rather than
+// silently letting both through. The admin Server Action wrapper
+// (src/app/(admin-protected)/admin/tracking-links/actions.ts) turns that
+// rejection into a friendly "please retry" message — not exercised here,
+// since it requires a Next.js request context this suite doesn't set up.
+test("concurrent publishes of the same link never produce two versions with the same version number", async () => {
+  const { admin, campaign, link } = await setupBasicFixture();
+
+  const publishOnce = () =>
+    prisma.$transaction((tx) =>
+      publishTrackingLinkVersion(
+        tx,
+        {
+          trackingLinkId: link.id,
+          campaignId: campaign.id,
+          socialAccountId: null,
+          pathType: PathType.DIRECT,
+          destinationUrl: "https://paybig.example/checkout",
+          ageGateEnabled: false,
+          experimentId: null,
+          experimentArmId: null,
+        },
+        admin.id,
+      ),
+    );
+
+  const settled = await Promise.allSettled([publishOnce(), publishOnce()]);
+  const fulfilled = settled.filter(
+    (s): s is PromiseFulfilledResult<Awaited<ReturnType<typeof publishOnce>>> => s.status === "fulfilled",
+  );
+  const succeeded = fulfilled.filter((s) => s.value.ok);
+  const rejected = settled.filter((s) => s.status === "rejected");
+
+  // Exactly one publish should have actually gone through; the other either
+  // rejects outright (unique-constraint violation) or — if it happened to
+  // run strictly after the first one committed — succeeds as version 2,
+  // which is also a valid, non-corrupting outcome. What must never happen is
+  // both claiming to be the same version number.
+  assert.ok(succeeded.length >= 1, "at least one publish should succeed");
+  for (const s of succeeded) {
+    const value = s.value;
+    if (value.ok) {
+      const versionId = value.versionId;
+      cleanup.push(() => prisma.trackingLinkVersion.delete({ where: { id: versionId } }));
+    }
+  }
+  cleanup.push(() => prisma.trackingLink.update({ where: { id: link.id }, data: { currentVersionId: null } }));
+
+  const versions = await prisma.trackingLinkVersion.findMany({ where: { trackingLinkId: link.id } });
+  const versionNumbers = versions.map((v) => v.versionNumber);
+  assert.equal(new Set(versionNumbers).size, versionNumbers.length, "version numbers must be unique");
+
+  if (rejected.length > 0) {
+    const reason = (rejected[0] as PromiseRejectedResult).reason;
+    assert.ok(reason instanceof Prisma.PrismaClientKnownRequestError && reason.code === "P2002");
+  }
 });

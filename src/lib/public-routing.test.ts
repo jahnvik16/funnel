@@ -185,6 +185,14 @@ test("getHostname strips the port", () => {
   assert.equal(getHostname(new Headers({ host: "links.example.com" })), "links.example.com");
 });
 
+// Hostnames are case-insensitive (RFC 4343); Domain.hostname is stored
+// lowercase (enforced by the admin form's validation), so the request side
+// must normalize too, or a Host header sent in a different case would fail
+// to resolve a link that genuinely exists.
+test("getHostname lowercases the host", () => {
+  assert.equal(getHostname(new Headers({ host: "Links.Example.COM:3000" })), "links.example.com");
+});
+
 test("getClientIp prefers x-forwarded-for's first entry, falls back to x-real-ip", () => {
   assert.equal(
     getClientIp(new Headers({ "x-forwarded-for": "203.0.113.5, 10.0.0.1" })),
@@ -573,4 +581,60 @@ test("hasFunnelEvent backs the gate's accept/decline idempotency guard", async (
   assert.equal(await hasFunnelEvent(prisma, click.id, "AGE_GATE_ACCEPTED"), false);
   await writeFunnelEvent(prisma, click.id, "AGE_GATE_ACCEPTED");
   assert.equal(await hasFunnelEvent(prisma, click.id, "AGE_GATE_ACCEPTED"), true);
+});
+
+// hasFunnelEvent-then-writeFunnelEvent (used by every one-time-event caller:
+// age gate accept/decline, Telegram start, outbound redirect) is a
+// check-then-write race under truly concurrent requests, not just sequential
+// retries — two calls can both see "no event yet" before either commits. The
+// partial unique index (migration 20260825200000_funnel_event_singleton_steps)
+// is what actually prevents two rows; this proves it holds under a real
+// concurrent write, not just sequential ones (which the existing
+// executeOutbound idempotency test above already covers).
+test("writeFunnelEvent survives a genuine concurrent race: only one row wins for a singleton step type", async () => {
+  const { domain, link } = await setupPublishedFixture();
+  const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
+  if (!resolved.ok) return assert.fail();
+  const click = await recordClick(prisma, resolved.link, resolved.versionId, resolved.snapshot, {
+    ip: null,
+    userAgent: null,
+    referrer: null,
+    searchParams: new URLSearchParams(),
+  });
+  cleanup.push(() => deleteClick(click.id));
+
+  await Promise.all([
+    writeFunnelEvent(prisma, click.id, "OUTBOUND_PAYBIG_REDIRECTED", { destinationUrl: "https://a.example" }),
+    writeFunnelEvent(prisma, click.id, "OUTBOUND_PAYBIG_REDIRECTED", { destinationUrl: "https://a.example" }),
+    writeFunnelEvent(prisma, click.id, "OUTBOUND_PAYBIG_REDIRECTED", { destinationUrl: "https://a.example" }),
+  ]);
+
+  const rows = await prisma.funnelEvent.findMany({
+    where: { clickId: click.id, stepType: "OUTBOUND_PAYBIG_REDIRECTED" },
+  });
+  assert.equal(rows.length, 1);
+});
+
+// Repeatable step types (AGGREGATOR_VIEWED, per D020) are explicitly not
+// covered by the partial unique index — this documents that boundary rather
+// than assuming it.
+test("writeFunnelEvent still allows genuine repeats for step types that aren't singletons", async () => {
+  const { domain, link } = await setupPublishedFixture({ pathType: PathType.AGGREGATOR });
+  const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
+  if (!resolved.ok) return assert.fail();
+  const click = await recordClick(prisma, resolved.link, resolved.versionId, resolved.snapshot, {
+    ip: null,
+    userAgent: null,
+    referrer: null,
+    searchParams: new URLSearchParams(),
+  });
+  cleanup.push(() => deleteClick(click.id));
+
+  await writeFunnelEvent(prisma, click.id, "AGGREGATOR_VIEWED");
+  await writeFunnelEvent(prisma, click.id, "AGGREGATOR_VIEWED");
+
+  const rows = await prisma.funnelEvent.findMany({
+    where: { clickId: click.id, stepType: "AGGREGATOR_VIEWED" },
+  });
+  assert.equal(rows.length, 2);
 });

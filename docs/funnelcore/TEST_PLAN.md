@@ -168,6 +168,33 @@ publishing link's brand (replacing the old, now-removed `experiment.trackingLink
   once V1 landed as an admin-triggered upload rather than a live webhook/API; see
   OPEN_QUESTIONS.md.
 
+### Hardening audit (this milestone) — see DECISIONS.md D034–D041 for full rationale
+- **Concurrency, not just sequential retries**: `public-routing.test.ts` fires several genuinely
+  concurrent (`Promise.all`) `writeFunnelEvent` calls for the same click and a singleton step
+  type, asserting exactly one row survives (D034) — and a companion test confirms a repeatable
+  step type (`AGGREGATOR_VIEWED`) still allows real duplicates, so the fix's boundary is
+  explicit, not assumed. `tracking-link-publishing.test.ts` does the same for two concurrent
+  publishes of the same link, asserting version numbers never collide even when one request
+  has to fail and retry (D041).
+- **Timing side-channels**: `telegram-webhook.test.ts` proves `verifyWebhookSecret` doesn't
+  throw on a mismatched-length header (the constant-time comparison's failure mode if the
+  length pre-check were ever removed — D035). `lib/auth/password.test.ts` proves
+  `DUMMY_PASSWORD_HASH` is inert (no real password matches it) and that comparing against it
+  costs roughly the same as a real comparison, not a fast-path bypass (D036) — this doesn't
+  assert exact timing equality (too flaky for a unit test), only that bcrypt's real cost is
+  paid on both paths.
+- **Malformed input**: `paybig-import.test.ts` covers a UTF-8-BOM-prefixed CSV header resolving
+  correctly instead of every row reporting the first column missing (D038).
+- **Hung network calls**: `telegram.test.ts` proves `callTelegramApi` passes an `AbortSignal` to
+  `fetch` and treats an abort like any other network failure, without waiting out a real
+  timeout in the test itself (D040).
+- **Case sensitivity**: `public-routing.test.ts` proves `getHostname` lowercases a mixed-case
+  `Host` header (D037).
+- Not unit tested (verified manually in a real browser instead, per the note in D039): the CSV
+  upload size cap, since the check lives in a Server Action wrapper this suite's testing
+  pattern doesn't reach into (route/action files are exercised manually, not unit tested — see
+  `lib/` vs. `app/` throughout this document).
+
 ### End-to-end / manual (per UI change, per the project's UI-testing rule in CLAUDE.md)
 - Admin: create a Brand → Platform → SocialAccount → Domain → Campaign → TrackingLink →
   publish → confirm it appears correctly in list/detail views.
@@ -191,6 +218,12 @@ publishing link's brand (replacing the old, now-removed `experiment.trackingLink
   table shows each arm's funnel metrics correctly isolated while both rows show the *same*
   campaign-level signup count. Switch the experiment's success metric to Signups and confirm
   the extra warning banner appears.
+- Hardening audit (this milestone): logged in with a nonexistent email (generic error, no
+  behavior change) and with real credentials (still succeeds) to confirm the timing-equalization
+  fix (D036) didn't break the login flow; uploaded a UTF-8-BOM-prefixed CSV through the real
+  `/admin/conversions` form and confirmed it imported correctly rather than reporting every
+  column missing (D038); published a new tracking-link version through the real form to confirm
+  the publish action's new try/catch (D041) doesn't affect the normal, non-colliding path.
 
 ## 3. What "done" looks like per phase
 

@@ -16,6 +16,13 @@ export type TelegramApiResult<T> =
 
 type FetchLike = typeof fetch;
 
+// Telegram being slow or unreachable must not hang the caller indefinitely —
+// the admin's "Validate" action is a synchronous request/response, and the
+// webhook handler needs to respond to Telegram promptly regardless of how
+// its own outbound call to Telegram behaves. AbortSignal.timeout() surfaces
+// as a normal fetch rejection, caught below like any other network failure.
+const REQUEST_TIMEOUT_MS = 8000;
+
 // Never logs `botToken` or the request URL (which embeds it) — only the
 // method name and Telegram's own response description, on failure. Callers
 // must keep following that discipline in whatever they do with the result.
@@ -30,6 +37,7 @@ export async function callTelegramApi<T>(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const data = (await response.json()) as { ok: boolean; result?: T; description?: string };
     if (!data.ok) {

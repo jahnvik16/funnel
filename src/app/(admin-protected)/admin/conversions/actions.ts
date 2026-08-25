@@ -9,6 +9,12 @@ import { importPaybigCsv, type ImportSummary } from "@/lib/paybig-import";
 
 export type ImportFormState = { error?: string; summary?: ImportSummary };
 
+// A generous cap for a CSV of conversion rows — well beyond any real Paybig
+// export seen so far. Without a limit, importPaybigCsv's row-by-row DB writes
+// on an arbitrarily large upload could tie up the request (and the database)
+// for an unbounded amount of time; rejecting upfront fails fast instead.
+const MAX_CSV_BYTES = 10 * 1024 * 1024; // 10 MB
+
 export async function importConversionsCsv(
   _prevState: ImportFormState,
   formData: FormData,
@@ -18,6 +24,9 @@ export async function importConversionsCsv(
   const file = formData.get("csvFile");
   if (!(file instanceof File) || file.size === 0) {
     return { error: "Choose a CSV file to import." };
+  }
+  if (file.size > MAX_CSV_BYTES) {
+    return { error: `File is too large (${Math.round(file.size / 1024 / 1024)} MB) — the limit is 10 MB.` };
   }
 
   const content = await file.text();

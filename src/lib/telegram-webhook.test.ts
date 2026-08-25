@@ -182,6 +182,16 @@ test("verifyWebhookSecret requires an exact match once a secret is configured", 
   assert.equal(verifyWebhookSecret("real-secret", null), false);
 });
 
+// timingSafeEqual (used internally for the constant-time comparison) throws
+// on mismatched buffer lengths — this proves the length pre-check actually
+// guards that, rather than crashing the webhook route on a short/long header.
+test("verifyWebhookSecret rejects a header of a different length without throwing", () => {
+  assert.doesNotThrow(() => verifyWebhookSecret("real-secret", "short"));
+  assert.equal(verifyWebhookSecret("real-secret", "short"), false);
+  assert.doesNotThrow(() => verifyWebhookSecret("real-secret", "real-secret-but-much-longer"));
+  assert.equal(verifyWebhookSecret("real-secret", "real-secret-but-much-longer"), false);
+});
+
 // --- Full webhook flow --------------------------------------------------------
 
 test("handleTelegramWebhook: happy path resolves the payload, logs telegram_started, and sends the CTA", async () => {

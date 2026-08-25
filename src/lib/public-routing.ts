@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
-import type { Prisma, Click, TrackingLink, FunnelStepType } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Click, TrackingLink, FunnelStepType } from "@prisma/client";
 import type { TrackingLinkVersionSnapshot } from "@/lib/tracking-link-publishing";
 import { createTelegramStartPayload } from "@/lib/telegram-payload";
 
@@ -56,9 +57,12 @@ export async function resolveTrackingLinkVersion(
 
 // Standard Web `Headers`, not a Next.js type — keeps this testable without
 // spinning up a Next.js request.
+// Lowercased because hostnames are case-insensitive (RFC 4343) but Postgres
+// text equality isn't — a stored "links.acme.example" would otherwise fail
+// to match a request Host header sent as "Links.Acme.Example".
 export function getHostname(headers: Headers): string {
   const host = headers.get("host") ?? "";
-  return host.split(":")[0];
+  return host.split(":")[0].toLowerCase();
 }
 
 export function getClientIp(headers: Headers): string | null {
@@ -125,15 +129,30 @@ export async function recordClick(
   });
 }
 
+// Every caller that guards a one-time event with hasFunnelEvent() first
+// (age-gate accept/decline, Telegram start, outbound redirect) still has a
+// check-then-write race under genuinely concurrent requests — the DB-level
+// partial unique index (migration 20260825200000_funnel_event_singleton_steps)
+// is what actually closes it. A unique-constraint violation here means a
+// concurrent request already won and recorded this exact one-time event,
+// which is the desired outcome, not a failure — every one of those callers
+// already treats "the event exists" as success.
 export async function writeFunnelEvent(
   db: Db,
   clickId: string,
   stepType: FunnelStepType,
   metadata?: Prisma.InputJsonValue,
 ): Promise<void> {
-  await db.funnelEvent.create({
-    data: { clickId, stepType, metadata: metadata ?? undefined },
-  });
+  try {
+    await db.funnelEvent.create({
+      data: { clickId, stepType, metadata: metadata ?? undefined },
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function hasFunnelEvent(

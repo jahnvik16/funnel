@@ -84,6 +84,26 @@ test("callTelegramApi fails safely (not a thrown error) when the network call it
   assert.match(result.description, /Could not reach/);
 });
 
+// A hung Telegram API call must not hang its caller forever — the webhook
+// route needs to respond to Telegram promptly, and the admin's synchronous
+// "Validate" action shouldn't spin indefinitely if Telegram is unreachable.
+// This doesn't wait out a real timeout (too slow for a unit test); it proves
+// callTelegramApi passes an abort signal at all, and that an abort is
+// handled as an ordinary failure rather than an uncaught rejection.
+test("callTelegramApi passes an abort signal, and treats an abort like any other network failure", async () => {
+  let sawSignal = false;
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    sawSignal = init?.signal instanceof AbortSignal;
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }) as typeof fetch;
+
+  const result = await callTelegramApi(FAKE_TOKEN, "getMe", undefined, fetchImpl);
+  assert.equal(sawSignal, true);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.description, /Could not reach/);
+});
+
 test("never logs the bot token, even on failure", async () => {
   const logged: string[] = [];
   const originalLog = console.log;

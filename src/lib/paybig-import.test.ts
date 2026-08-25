@@ -103,6 +103,20 @@ test("parseCsv returns nothing for an empty file", () => {
   assert.deepEqual(rows, []);
 });
 
+// Excel-exported CSVs commonly prepend a UTF-8 BOM. Left in, it silently
+// fuses onto the first header cell's name, so every row would report that
+// column "missing" with no obvious hint why — a systemic, hard-to-diagnose
+// failure rather than a crash.
+test("parseCsv strips a leading UTF-8 BOM instead of fusing it onto the first header", () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const { header, rows } = parseCsv(
+    `${BOM}conversion_id,conversion_time,campaign_slug,amount,currency\n` +
+      "abc123,2026-08-01T12:00:00Z,spring-push,19.99,USD\n",
+  );
+  assert.equal(header[0], "conversion_id");
+  assert.equal(rows[0].conversion_id, "abc123");
+});
+
 // ---------------------------------------------------------------------------
 // validatePaybigRow
 // ---------------------------------------------------------------------------

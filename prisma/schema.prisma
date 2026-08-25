@@ -437,6 +437,13 @@ model Click {
   @@map("clicks")
 }
 
+// A partial unique index on (clickId, stepType) — for AGE_GATE_ACCEPTED,
+// AGE_GATE_DECLINED, TELEGRAM_STARTED, and OUTBOUND_PAYBIG_REDIRECTED only —
+// is applied via the hand-authored migration
+// 20260825200000_funnel_event_singleton_steps, since Prisma's schema DSL has
+// no partial-index support. It exists so a genuine concurrent race (not just
+// a sequential retry) can never produce two rows for a step that must only
+// ever happen once per click; see lib/public-routing.ts's writeFunnelEvent().
 model FunnelEvent {
   id         String   @id @default(cuid())
   clickId    String

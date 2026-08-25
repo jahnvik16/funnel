@@ -241,9 +241,24 @@ export async function publishTrackingLinkVersion(
     return { error: parsed.error };
   }
 
-  const result = await prisma.$transaction((tx) =>
-    publishTrackingLinkVersionCore(tx, parsed.input, admin.id),
-  );
+  let result;
+  try {
+    result = await prisma.$transaction((tx) =>
+      publishTrackingLinkVersionCore(tx, parsed.input, admin.id),
+    );
+  } catch (error) {
+    // Two publishes for the same link, close enough together to both read
+    // the same "next version number" before either commits, collide on
+    // (trackingLinkId, versionNumber)'s unique constraint — the constraint
+    // is what actually prevents the corruption (two versions claiming the
+    // same number); this just turns the resulting crash into a message
+    // asking the admin to retry, which succeeds immediately (the next read
+    // sees the other publish's version and picks the number after it).
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return { error: "Another version was just published for this link — please retry." };
+    }
+    throw error;
+  }
 
   if (!result.ok) {
     return { issues: result.issues };

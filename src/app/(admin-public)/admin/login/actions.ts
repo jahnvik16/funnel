@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { verifyPassword } from "@/lib/auth/password";
+import { verifyPassword, DUMMY_PASSWORD_HASH } from "@/lib/auth/password";
 import { createSession } from "@/lib/auth/session";
 
 const loginSchema = z.object({
@@ -32,12 +32,10 @@ export async function login(
 
   // Same generic error whether the email doesn't exist, the account is
   // disabled, or the password is wrong — never reveal which case it was.
-  if (!adminUser || !adminUser.isActive) {
-    return INVALID_CREDENTIALS;
-  }
-
-  const passwordValid = await verifyPassword(password, adminUser.passwordHash);
-  if (!passwordValid) {
+  // Also same *timing*: always pay bcrypt's cost, even for an unknown email,
+  // so response time alone can't be used to enumerate valid admin accounts.
+  const passwordValid = await verifyPassword(password, adminUser?.passwordHash ?? DUMMY_PASSWORD_HASH);
+  if (!adminUser || !adminUser.isActive || !passwordValid) {
     return INVALID_CREDENTIALS;
   }
 

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "crypto";
 import type { Prisma } from "@prisma/client";
 import { decryptSecret } from "@/lib/crypto";
 import { sendMessage, type TelegramCta } from "@/lib/telegram";
@@ -34,7 +35,15 @@ export function extractStartPayload(update: TelegramUpdate): string | null {
 // the header must match exactly.
 export function verifyWebhookSecret(storedSecret: string | null, headerValue: string | null): boolean {
   if (!storedSecret) return true;
-  return headerValue === storedSecret;
+  if (!headerValue) return false;
+  // Constant-time comparison — a plain `===` leaks how many leading bytes
+  // matched via response timing, which is a real (if slow) way to brute-force
+  // a secret byte-by-byte. timingSafeEqual requires equal-length buffers, so
+  // the length check above must stay a cheap, non-secret-dependent bailout.
+  const stored = Buffer.from(storedSecret);
+  const header = Buffer.from(headerValue);
+  if (stored.length !== header.length) return false;
+  return timingSafeEqual(stored, header);
 }
 
 export type TelegramWebhookResult =

@@ -320,6 +320,14 @@ exactly where each step fires.
 | metadata | Json? | e.g. `{pathType}` on `ROUTE_RESOLVED`, `{telegramBotId, botUsername}` on `TELEGRAM_REDIRECTED`, `{telegramBotId}` on `TELEGRAM_STARTED`, `{destinationUrl}` on `OUTBOUND_PAYBIG_REDIRECTED`, `{reason, pathType?}` on `ROUTE_FAILED` |
 | occurredAt | DateTime | |
 
+A partial unique index on `(clickId, stepType)` — for `AGE_GATE_ACCEPTED`, `AGE_GATE_DECLINED`,
+`TELEGRAM_STARTED`, and `OUTBOUND_PAYBIG_REDIRECTED` only — guarantees at the database level that
+those one-time steps can never have two rows for the same click, even under genuinely concurrent
+requests (not expressible in Prisma's schema DSL; applied via the hand-authored migration
+`20260825200000_funnel_event_singleton_steps`). See DECISIONS.md D034. `ROUTE_RESOLVED`,
+`AGE_GATE_SHOWN`, and `AGGREGATOR_VIEWED` are excluded on purpose — those are genuine repeat
+views, not one-time transitions (DECISIONS.md D020).
+
 `TELEGRAM_STARTED` has the same once-per-click idempotency guard as `OUTBOUND_PAYBIG_
 REDIRECTED` (checked via `hasFunnelEvent` rather than by inspecting prior metadata) — Telegram
 may redeliver a webhook update, and the payload's own `consumedAt` can't be relied on alone
