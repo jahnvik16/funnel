@@ -350,3 +350,67 @@ also deliberately defined as *attributed* signups (`campaignId IS NOT NULL`) so 
 double-counts a row already reported under the separate "unmatched conversions" metric — an
 inconsistency the manual browser verification for this milestone caught before the fix landed
 (the two counts summed to more than the true total).
+
+## D030 — `Experiment.trackingLinkId` removed; an arm's tracking link is set only via publishing, not experiment-level scoping
+**Date:** 2026-08-25
+Phase 1b/2/3 gave `Experiment` a single optional `trackingLinkId`, modeling "this experiment
+lives on this one link" — workable for a classic same-link creative A/B test, but structurally
+wrong for the "aggregator vs Telegram" milestone's actual scenario: Arm A needs an
+`AGGREGATOR`-path link and Arm B needs a `TELEGRAM`-path link, and a single `TrackingLink` only
+ever has one current `pathType` at a time, so two arms can never both be "live" through one
+shared link. The field also actively conflicted with the *already-existing* mechanism for
+wiring an arm to a link — publishing a `TrackingLinkVersion` with `experimentArmId` selected
+(built in Phase 3b) already worked for any link/arm combination as long as
+`experiment.trackingLinkId` was left null; the field only got in the way when set.
+
+Removed outright (migration `20260825190000_experiment_success_metric`) rather than kept
+unused — no production data exists yet (same D016 precedent), and keeping a field whose only
+effect is to break the milestone's own example scenario is worse than deleting it. In its
+place, `loadAndValidate` gained a narrower, correct check: if `experimentArm.experiment.brandId`
+is set, it must match the tracking link's brand (mirroring the existing social-account/
+telegram-bot brand-match checks) — brand is still optional scoping metadata, not a hard link
+constraint.
+
+## D031 — `Experiment` gained `platformId` (optional) and `successMetric`; both are display/scoping metadata only
+**Date:** 2026-08-25
+The milestone's spec is explicit: "An Experiment has: name, optional brand, optional platform,
+start/end, status, success metric." `brandId` became nullable (previously required) and
+`platformId` was added as a second optional FK, matching `brandId`'s pattern exactly — neither
+is enforced against the arms' actual clicks; they exist so an admin can label what an
+experiment is about. `successMetric` is a new required field, a fixed `ExperimentSuccessMetric`
+enum mirroring the six metrics `lib/attribution-report.ts` already computes (`CLICKS` through
+`SIGNUPS`), defaulting to `OUTBOUND_REDIRECTS` (the one funnel step every path type reaches,
+per D019/D025). It is surfaced prominently on the experiment detail page purely for the
+admin's own reference — CLAUDE.md's brief is explicit that V1 must not build "automatic winner
+selection," so `successMetric` never feeds any comparison, ranking, or highlighting logic
+beyond a label and (when it's `SIGNUPS`) an extra warning that the chosen metric can't actually
+be measured per arm — see D032.
+
+## D032 — Per-arm reporting shows campaign-level signups honestly, never allocated or estimated per arm
+**Date:** 2026-08-25
+`buildExperimentArmReport` (`lib/attribution-report.ts`) computes each arm's funnel metrics
+(clicks through outbound redirects) precisely, scoped by `experimentArmId` — full precision,
+since `Click`/`FunnelEvent` carry real arm-level attribution via the frozen
+`TrackingLinkVersion` snapshot (unchanged from D029's mechanism). Signups are a different
+story: Paybig conversions only ever join to `Campaign`, never to an arm or click, so there is
+no way to split a campaign's signups across the arms that share it — and the milestone
+explicitly forbids inventing one ("do not build... complex statistical inference"). Rather than
+show `N/A` for every arm's signups (technically honest but throws away real information), each
+row shows the **campaign** its arm's link currently funnels through, and that campaign's total
+signup count — explicitly labeled "campaign-level" in the UI, with a footnote that identical
+numbers on two rows sharing a campaign must never be summed. This is the most precise number
+that's still an honest one: it tells the admin exactly what Paybig data supports (a campaign
+converted N times) without pretending to know which arm produced any individual signup.
+
+## D033 — No automatic traffic splitting, winner selection, or statistical inference — arms are wired to links by hand
+**Date:** 2026-08-25
+Directly per the milestone's explicit exclusions. `ExperimentArm.weight` (an `Int`, existing
+since Phase 1b/2/3) is stored and displayed but never read by any routing or allocation logic —
+the public `/l/[token]` route (`lib/public-routing.ts`) has no knowledge of experiments at all;
+it only ever resolves one token to one link to one current version. Two "arms" of an experiment
+are, mechanically, just two ordinary tracking links that happen to have been published with the
+same `experimentId`/`experimentArmId` selected — an admin achieves a traffic split by
+distributing the two links differently (e.g. one per bio-link placement), not by anything
+FunnelCore computes or randomizes. No p-value, confidence interval, or "declare a winner"
+affordance exists anywhere in the admin UI; `successMetric` (D031) is the closest thing to a
+comparison aid, and it is deliberately inert beyond a label.

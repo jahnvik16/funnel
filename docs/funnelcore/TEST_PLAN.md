@@ -137,6 +137,24 @@ events, and three conversions: one attributed, one on the default campaign, one 
 - A filter set matching nothing returns zeros and `null` rates rather than throwing or
   dividing by zero.
 
+The same file's `buildExperimentArmReport` tests cover the "aggregator vs Telegram" dashboard:
+- A three-arm experiment (`AGGREGATOR` link, `TELEGRAM` link, and one arm never published to)
+  returns one row per arm in creation order; each populated row's funnel metrics are precise
+  (isolated to that arm's own clicks/events) and its `trackingLink`/`campaign` correctly
+  identify what it's wired to; the never-published arm reports `trackingLink: null`,
+  `campaign: null`, `campaignSignups: null`, and all-zero funnel metrics rather than erroring.
+- **Regression-shaped case**: when two arms' links both publish against the *same* campaign,
+  both rows report the *identical* `campaignSignups` figure — proving the dashboard shows an
+  honest campaign-level number rather than fabricating a per-arm split Paybig data can't
+  support (see DECISIONS.md D032).
+- A second test with two arms on two *different* campaigns confirms `campaignSignups` is
+  independent per row in that case (2 vs. 1), not a global figure.
+
+`src/lib/tracking-link-publishing.test.ts` also covers the experiment/publish integration
+points touched by this milestone: publishing accepts an experiment arm whose experiment has no
+`brandId` restriction, and rejects one whose experiment's `brandId` doesn't match the
+publishing link's brand (replacing the old, now-removed `experiment.trackingLinkId` check).
+
 ### Security-focused tests
 - A Server Action or API route that returns `TelegramBot` or `ApiConnection` data to a client
   never includes `botTokenCiphertext` / `webhookSecretCiphertext` / `credentialsCiphertext` in
@@ -164,6 +182,15 @@ events, and three conversions: one attributed, one on the default campaign, one 
   unmatched double-counting bug fixed in DECISIONS.md D029 during this exact check). Confirm
   the attribution dashboard's warning banner appears the moment a path/social-account/
   experiment/experiment-arm filter is selected, and disappears when cleared.
+- Admin: create an experiment with two arms ("Aggregator", "Telegram"); publish one tracking
+  link as `AGGREGATOR` and a second, different link as `TELEGRAM`, selecting the matching
+  experiment/arm on each publish — confirm both links' published-version snapshots show the
+  correct arm and that the experiment's arms table shows each arm wired to its own link (the
+  scenario D030 exists to make possible). Manually insert `Click`/`FunnelEvent` rows for each
+  arm's version and a `Conversion` against their shared campaign; confirm the "Arm performance"
+  table shows each arm's funnel metrics correctly isolated while both rows show the *same*
+  campaign-level signup count. Switch the experiment's success metric to Signups and confirm
+  the extra warning banner appears.
 
 ## 3. What "done" looks like per phase
 

@@ -35,8 +35,13 @@ export default async function TrackingLinkDetailPage({
         select: { id: true, name: true, status: true },
         orderBy: { name: "asc" },
       }),
+      // An experiment's brand is optional scoping metadata, not an
+      // enforced restriction — brand-less experiments are offered
+      // everywhere, brand-scoped ones only where the brand matches (the
+      // publish validation in lib/tracking-link-publishing.ts rejects a
+      // brand mismatch too, so this is a UX narrowing, not the real guard).
       prisma.experiment.findMany({
-        where: { trackingLinkId: link.id },
+        where: { status: "ACTIVE", OR: [{ brandId: null }, { brandId: link.brandId }] },
         include: { arms: true },
         orderBy: { name: "asc" },
       }),

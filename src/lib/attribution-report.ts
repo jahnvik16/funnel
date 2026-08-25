@@ -176,3 +176,72 @@ export async function buildAttributionReport(db: Db, filters: ReportFilters): Pr
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Per-arm experiment report — the "aggregator vs Telegram" dashboard
+// ---------------------------------------------------------------------------
+
+export type ExperimentArmRow = {
+  armId: string;
+  armName: string;
+  weight: number;
+  status: string;
+  // The tracking link/campaign an arm is currently wired to, discovered via
+  // whichever TrackingLinkVersion was most recently published with this arm
+  // selected (see lib/tracking-link-publishing.ts) — null until an admin has
+  // published a version for this arm at least once. V1 is manually assigned
+  // (no automatic traffic splitting), so this can legitimately stay null.
+  trackingLink: { id: string; label: string; token: string } | null;
+  campaign: { id: string; name: string } | null;
+  funnel: AttributionReport["funnel"];
+  // Campaign-level signups for the campaign this arm's link funnels through
+  // — NOT exclusive to this arm. Paybig conversions carry no arm/click
+  // attribution (see isSignupAttributionCompatible above), so this is the
+  // most precise honest number available: the total signups reported for
+  // that campaign, from any tracking link that uses it. If two arms share a
+  // campaign, both rows show the same number — it must never be summed
+  // across arms. Null when the arm has no assigned campaign yet.
+  campaignSignups: number | null;
+};
+
+// One row per arm of an experiment, each computed via buildAttributionReport
+// scoped to that specific arm (full click/funnel-event precision) plus a
+// separate campaign-scoped lookup for the signups figure. Deliberately does
+// not attempt to allocate/estimate signups per arm — see CLAUDE.md's
+// "critical attribution rule" and DECISIONS.md's entry for this milestone.
+export async function buildExperimentArmReport(db: Db, experimentId: string): Promise<ExperimentArmRow[]> {
+  const arms = await db.experimentArm.findMany({
+    where: { experimentId },
+    orderBy: { createdAt: "asc" },
+    include: {
+      trackingLinkVersion: { include: { trackingLink: true, campaign: true } },
+    },
+  });
+
+  const rows: ExperimentArmRow[] = [];
+  for (const arm of arms) {
+    const version = arm.trackingLinkVersion;
+    const armReport = await buildAttributionReport(db, { experimentArmId: arm.id });
+
+    let campaignSignups: number | null = null;
+    if (version) {
+      const campaignReport = await buildAttributionReport(db, { campaignId: version.campaignId });
+      campaignSignups = campaignReport.signupAttribution.signups;
+    }
+
+    rows.push({
+      armId: arm.id,
+      armName: arm.name,
+      weight: arm.weight,
+      status: arm.status,
+      trackingLink: version
+        ? { id: version.trackingLink.id, label: version.trackingLink.label, token: version.trackingLink.token }
+        : null,
+      campaign: version ? { id: version.campaign.id, name: version.campaign.name } : null,
+      funnel: armReport.funnel,
+      campaignSignups,
+    });
+  }
+
+  return rows;
+}

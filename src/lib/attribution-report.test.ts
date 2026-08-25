@@ -10,7 +10,7 @@ import { randomBytes } from "crypto";
 import { PathType, type FunnelStepType } from "@prisma/client";
 import { prisma } from "./prisma";
 import { publishTrackingLinkVersion } from "./tracking-link-publishing";
-import { buildAttributionReport } from "./attribution-report";
+import { buildAttributionReport, buildExperimentArmReport } from "./attribution-report";
 
 function unique(prefix: string): string {
   return `${prefix}-${randomBytes(4).toString("hex")}`;
@@ -383,4 +383,188 @@ test("buildAttributionReport returns zeros and null rates for filters matching n
   assert.equal(report.signupAttribution.signups, 0);
   assert.equal(report.signupAttribution.signupRatePerClick, null);
   assert.equal(report.signupAttribution.compatible, true);
+});
+
+test("buildExperimentArmReport: per-arm funnel metrics are precise; campaign-level signups are shared, honestly, across arms on the same campaign", async () => {
+  const admin = await makeAdmin();
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const domain = await makeDomain(brand.id);
+  const sharedCampaign = await makeCampaign(brand.id, platform.id);
+  const experiment = await makeExperiment(brand.id);
+  const armAggregator = await makeExperimentArm(experiment.id);
+  const armTelegram = await makeExperimentArm(experiment.id);
+  const armUnassigned = await makeExperimentArm(experiment.id);
+
+  const aggregatorLink = await makeTrackingLink(brand.id, domain.id);
+  const aggregatorVersionId = await publishVersion(admin.id, aggregatorLink.id, sharedCampaign.id, {
+    pathType: PathType.AGGREGATOR,
+    experimentId: experiment.id,
+    experimentArmId: armAggregator.id,
+  });
+
+  const telegramBot = await prisma.telegramBot.create({
+    data: { brandId: brand.id, name: unique("Bot"), botTokenCiphertext: "test.ciphertext", botUsername: unique("bot") },
+  });
+  cleanup.push(() => prisma.telegramBot.delete({ where: { id: telegramBot.id } }));
+  const telegramLink = await makeTrackingLink(brand.id, domain.id);
+  const telegramResult = await prisma.$transaction((tx) =>
+    publishTrackingLinkVersion(
+      tx,
+      {
+        trackingLinkId: telegramLink.id,
+        campaignId: sharedCampaign.id,
+        socialAccountId: null,
+        pathType: PathType.TELEGRAM,
+        telegramBotId: telegramBot.id,
+        ageGateEnabled: false,
+        experimentId: experiment.id,
+        experimentArmId: armTelegram.id,
+      },
+      admin.id,
+    ),
+  );
+  assert.equal(telegramResult.ok, true);
+  if (!telegramResult.ok) throw new Error("unreachable");
+  const telegramVersionId = telegramResult.versionId;
+  cleanup.push(() => prisma.trackingLinkVersion.delete({ where: { id: telegramVersionId } }));
+  cleanup.push(() => prisma.trackingLink.update({ where: { id: telegramLink.id }, data: { currentVersionId: null } }));
+  cleanup.push(() =>
+    prisma.experimentArm.update({ where: { id: armTelegram.id }, data: { trackingLinkVersionId: null } }),
+  );
+
+  const clickA = await makeClick({
+    trackingLinkId: aggregatorLink.id,
+    trackingLinkVersionId: aggregatorVersionId,
+    brandId: brand.id,
+    campaignId: sharedCampaign.id,
+    clickedAt: WINDOW_MID,
+  });
+  await addEvent(clickA.id, "AGGREGATOR_VIEWED");
+  await addEvent(clickA.id, "OUTBOUND_PAYBIG_REDIRECTED");
+
+  const clickB1 = await makeClick({
+    trackingLinkId: telegramLink.id,
+    trackingLinkVersionId: telegramVersionId,
+    brandId: brand.id,
+    campaignId: sharedCampaign.id,
+    clickedAt: WINDOW_MID,
+  });
+  await addEvent(clickB1.id, "TELEGRAM_STARTED");
+  const clickB2 = await makeClick({
+    trackingLinkId: telegramLink.id,
+    trackingLinkVersionId: telegramVersionId,
+    brandId: brand.id,
+    campaignId: sharedCampaign.id,
+    clickedAt: WINDOW_MID,
+  });
+  await addEvent(clickB2.id, "TELEGRAM_STARTED");
+
+  const conversionId = unique("conv-experiment");
+  cleanup.push(() => deleteConversion(conversionId));
+  await prisma.conversion.create({
+    data: {
+      paybigConversionId: conversionId,
+      campaignId: sharedCampaign.id,
+      brandId: brand.id,
+      amount: "9.99",
+      currency: "USD",
+      occurredAt: WINDOW_MID,
+      rawPayload: {},
+    },
+  });
+
+  const rows = await buildExperimentArmReport(prisma, experiment.id);
+  assert.equal(rows.length, 3);
+
+  const rowA = rows.find((r) => r.armId === armAggregator.id)!;
+  assert.equal(rowA.trackingLink?.id, aggregatorLink.id);
+  assert.equal(rowA.campaign?.id, sharedCampaign.id);
+  assert.equal(rowA.funnel.clicks, 1);
+  assert.equal(rowA.funnel.aggregatorViews, 1);
+  assert.equal(rowA.funnel.telegramStarts, 0);
+  assert.equal(rowA.funnel.outboundRedirects, 1);
+
+  const rowB = rows.find((r) => r.armId === armTelegram.id)!;
+  assert.equal(rowB.trackingLink?.id, telegramLink.id);
+  assert.equal(rowB.campaign?.id, sharedCampaign.id);
+  assert.equal(rowB.funnel.clicks, 2);
+  assert.equal(rowB.funnel.telegramStarts, 2);
+  assert.equal(rowB.funnel.aggregatorViews, 0);
+
+  // Both arms fund the same campaign, so both show the identical
+  // campaign-level signup count — never each arm's own exclusive slice,
+  // because Paybig data cannot support that distinction.
+  assert.equal(rowA.campaignSignups, 1);
+  assert.equal(rowB.campaignSignups, 1);
+
+  const rowUnassigned = rows.find((r) => r.armId === armUnassigned.id)!;
+  assert.equal(rowUnassigned.trackingLink, null);
+  assert.equal(rowUnassigned.campaign, null);
+  assert.equal(rowUnassigned.campaignSignups, null);
+  assert.equal(rowUnassigned.funnel.clicks, 0);
+});
+
+test("buildExperimentArmReport: arms on different campaigns report independent signup counts", async () => {
+  const admin = await makeAdmin();
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const domain = await makeDomain(brand.id);
+  const campaignA = await makeCampaign(brand.id, platform.id);
+  const campaignB = await makeCampaign(brand.id, platform.id);
+  const experiment = await makeExperiment(brand.id);
+  const armA = await makeExperimentArm(experiment.id);
+  const armB = await makeExperimentArm(experiment.id);
+
+  const linkA = await makeTrackingLink(brand.id, domain.id);
+  await publishVersion(admin.id, linkA.id, campaignA.id, { experimentId: experiment.id, experimentArmId: armA.id });
+  const linkB = await makeTrackingLink(brand.id, domain.id);
+  await publishVersion(admin.id, linkB.id, campaignB.id, { experimentId: experiment.id, experimentArmId: armB.id });
+
+  const convA = unique("conv-a");
+  const convB = unique("conv-b");
+  cleanup.push(() => deleteConversion(convA));
+  cleanup.push(() => deleteConversion(convB));
+  await prisma.conversion.create({
+    data: {
+      paybigConversionId: convA,
+      campaignId: campaignA.id,
+      brandId: brand.id,
+      amount: "1.00",
+      currency: "USD",
+      occurredAt: WINDOW_MID,
+      rawPayload: {},
+    },
+  });
+  await prisma.conversion.create({
+    data: {
+      paybigConversionId: convB,
+      campaignId: campaignB.id,
+      brandId: brand.id,
+      amount: "1.00",
+      currency: "USD",
+      occurredAt: WINDOW_MID,
+      rawPayload: {},
+    },
+  });
+  await prisma.conversion.create({
+    data: {
+      paybigConversionId: unique("conv-b-2"),
+      campaignId: campaignB.id,
+      brandId: brand.id,
+      amount: "1.00",
+      currency: "USD",
+      occurredAt: WINDOW_MID,
+      rawPayload: {},
+    },
+  });
+  cleanup.push(async () => {
+    await prisma.conversion.deleteMany({ where: { campaignId: campaignB.id } });
+  });
+
+  const rows = await buildExperimentArmReport(prisma, experiment.id);
+  const rowA = rows.find((r) => r.armId === armA.id)!;
+  const rowB = rows.find((r) => r.armId === armB.id)!;
+  assert.equal(rowA.campaignSignups, 1);
+  assert.equal(rowB.campaignSignups, 2);
 });

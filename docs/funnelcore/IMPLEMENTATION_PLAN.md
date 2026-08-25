@@ -153,13 +153,35 @@ sequenced here. Delivered together:
       unavailable rather than silently showing a number the data can't support — see
       DECISIONS.md D029, the milestone's "critical attribution rule."
 
-## Phase 7 — Experiment execution (if still needed)
+## Phase 7 — Aggregator vs Telegram experiment framework (done, manually assigned — see below)
 
-`Experiment`/`ExperimentArm` CRUD and arm-to-version assignment already exist (Phase 1b/2/3).
-What's still undone, and only worth building after Phase 6 ships and the team confirms it's
-still wanted for V1: actually splitting public traffic across an experiment's arms inside the
-`/l/[token]` route (currently that route doesn't exist yet — see Phase 4). Do not build a
-generic experimentation framework speculatively.
+The brief confirmed this milestone explicitly and drew a hard V1 line: manually assigned
+tracking links/accounts, no automatic randomization, no automatic winner selection, no
+statistical inference, no generic experimentation engine.
+
+- [x] Schema: `Experiment.brandId` made optional, `Experiment.platformId` (optional) and
+      `Experiment.successMetric` (required, a fixed enum mirroring the dashboard's metrics)
+      added. `Experiment.trackingLinkId` — the old single-link scoping field, structurally
+      incompatible with two arms needing two different path types/links — removed. See
+      DECISIONS.md D030/D031.
+- [x] Admin UI: experiment brand/platform/success-metric fields; simplified arm creation
+      (name + weight only — a tracking link is wired to an arm exclusively by publishing that
+      link with the experiment/arm selected, the existing Phase 3b mechanism, now the *only*
+      path since the direct-assign shortcut on arm creation was removed).
+      `lib/tracking-link-publishing.ts` gained a brand-match check between an arm's experiment
+      and the publishing link, mirroring the existing social-account/telegram-bot checks.
+- [x] `lib/attribution-report.ts`'s `buildExperimentArmReport` — one row per arm: clicks, gate
+      accepts, aggregator views, Telegram starts, and outbound redirects computed precisely
+      (scoped by `experimentArmId`, reusing the existing `buildAttributionReport`); a
+      campaign-level signups figure shown honestly (not allocated/estimated per arm) with a
+      clear label and a warning when two arms share a campaign. See DECISIONS.md D032.
+- [x] Experiment detail page's new "Arm performance" table renders the above, plus the
+      experiment's `successMetric` for reference (an extra warning appears when the chosen
+      metric is `SIGNUPS`, since that one can never be measured per arm in V1).
+- [x] Deliberately not built: traffic splitting/weighting execution (`ExperimentArm.weight` is
+      stored and displayed only), winner selection, confidence intervals, or any generic
+      experimentation abstraction beyond the fixed "grouping of arms" shape. See DECISIONS.md
+      D033.
 
 ## Sequencing notes
 

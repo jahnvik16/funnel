@@ -153,9 +153,9 @@ test("resolveTelegramStartPayload preserves attribution: click_id, tracking_link
 });
 
 test("resolveTelegramStartPayload resolves experiment_arm_id when an arm is attached to the version", async () => {
-  const { click, bot, link, versionId, brand } = await setupFixture();
+  const { click, bot, versionId, brand } = await setupFixture();
   const experiment = await prisma.experiment.create({
-    data: { brandId: brand.id, trackingLinkId: link.id, name: unique("Experiment") },
+    data: { brandId: brand.id, name: unique("Experiment") },
   });
   cleanup.push(() => prisma.experiment.delete({ where: { id: experiment.id } }));
   const arm = await prisma.experimentArm.create({

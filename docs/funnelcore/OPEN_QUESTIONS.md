@@ -84,11 +84,25 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   automates, or is DNS/TLS handled manually outside the app and `Domain` is just a config
   record for routing? Affects whether Phase 1 needs any external DNS/certificate API calls.
 
-## Experiments
-- No concrete use case has been specified yet beyond "admin should eventually configure
-  experiments." Deliberately left minimal (`variantConfig Json`, no experiment execution
-  logic) until there's a real scenario to design against — see IMPLEMENTATION_PLAN.md
-  Phase 7. Do not build this out speculatively.
+## Experiments — V1 "aggregator vs Telegram" framework shipped; what remains open
+- **Resolved for V1**: the concrete use case is manually-assigned arms (e.g. one arm's link
+  published as `AGGREGATOR`, another arm's link published as `TELEGRAM`) with per-arm funnel
+  reporting — see IMPLEMENTATION_PLAN.md Phase 7 and DECISIONS.md D030–D033.
+  `ExperimentArm.weight` and `successMetric` are stored/displayed but do not drive any
+  behavior; there is no traffic splitting, winner selection, or statistical inference, per the
+  milestone's explicit exclusions.
+- **Still open**: if traffic-split execution is ever wanted (the public `/l/[token]` route
+  actually randomizing which of an experiment's arms/links a visitor lands on, rather than an
+  admin distributing two links by hand), that's new work in `lib/public-routing.ts` — not
+  attempted here, and only worth doing if V1's manual approach proves insufficient in practice.
+- **Still open**: no re-validation/staleness warning when an arm's `trackingLinkVersionId`
+  points at a version that's no longer that link's `currentVersionId` (i.e. the link was
+  re-published without re-selecting the same arm) — the admin UI shows whatever the arm is
+  currently wired to, without flagging that it may be stale. Acceptable for V1's "manually
+  assigned" scope; revisit if this causes real confusion.
+- **Still open**: no statistical significance/confidence-interval tooling exists or is planned
+  for V1 — an admin comparing two arms' funnel numbers is doing so by eye. Explicitly out of
+  scope per the milestone brief ("do not build... complex statistical inference").
 
 ## `pathConfig` / `telegramBotId` consistency — resolved
 - Decided in the Phase 1b/2/3 admin CRUD milestone: enforced at the application layer only

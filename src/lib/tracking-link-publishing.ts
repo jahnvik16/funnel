@@ -195,10 +195,14 @@ async function loadAndValidate(
           message: "The selected arm does not belong to the selected experiment.",
         });
       }
-      if (experimentArm.experiment.trackingLinkId && experimentArm.experiment.trackingLinkId !== link.id) {
+      // An arm's tracking link is whatever link last published a version with
+      // it selected (V1's manual assignment — see DECISIONS.md) — there is no
+      // separate "this experiment belongs to this link" constraint to check
+      // beyond a brand match, when the experiment declares one.
+      if (experimentArm.experiment.brandId && experimentArm.experiment.brandId !== link.brandId) {
         issues.push({
           field: "experimentArmId",
-          message: "This experiment is not associated with this tracking link.",
+          message: "Experiment belongs to a different brand than this tracking link.",
         });
       }
     }

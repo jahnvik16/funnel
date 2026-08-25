@@ -276,11 +276,11 @@ test("validation rejects an experiment arm that doesn't belong to the selected e
   const { brand, link } = await setupBasicFixture();
   const campaign2 = await makeCampaign(brand.id, (await makePlatform()).id, "https://paybig.example/lane/x");
   const experimentA = await prisma.experiment.create({
-    data: { brandId: brand.id, trackingLinkId: link.id, name: unique("Experiment A") },
+    data: { brandId: brand.id, name: unique("Experiment A") },
   });
   cleanup.push(() => prisma.experiment.delete({ where: { id: experimentA.id } }));
   const experimentB = await prisma.experiment.create({
-    data: { brandId: brand.id, trackingLinkId: link.id, name: unique("Experiment B") },
+    data: { brandId: brand.id, name: unique("Experiment B") },
   });
   cleanup.push(() => prisma.experiment.delete({ where: { id: experimentB.id } }));
   const armOfB = await prisma.experimentArm.create({
@@ -303,4 +303,58 @@ test("validation rejects an experiment arm that doesn't belong to the selected e
   assert.ok(
     result.issues.some((i) => i.field === "experimentArmId" && i.message.includes("does not belong")),
   );
+});
+
+test("validation rejects an experiment arm whose experiment belongs to a different brand", async () => {
+  const { campaign, link } = await setupBasicFixture();
+  const otherBrand = await makeBrand();
+  const experiment = await prisma.experiment.create({
+    data: { brandId: otherBrand.id, name: unique("Cross-brand experiment") },
+  });
+  cleanup.push(() => prisma.experiment.delete({ where: { id: experiment.id } }));
+  const arm = await prisma.experimentArm.create({
+    data: { experimentId: experiment.id, name: "control", weight: 50 },
+  });
+  cleanup.push(() => prisma.experimentArm.delete({ where: { id: arm.id } }));
+
+  const result = await validateTrackingLinkConfig(prisma, {
+    trackingLinkId: link.id,
+    campaignId: campaign.id,
+    socialAccountId: null,
+    pathType: PathType.DIRECT,
+    destinationUrl: "https://acme.example/offer",
+    ageGateEnabled: false,
+    experimentId: experiment.id,
+    experimentArmId: arm.id,
+  });
+
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.issues.some((i) => i.field === "experimentArmId" && i.message.includes("different brand")),
+  );
+});
+
+test("validation accepts an experiment arm whose experiment has no brand restriction", async () => {
+  const { campaign, link } = await setupBasicFixture();
+  const experiment = await prisma.experiment.create({
+    data: { name: unique("Brand-agnostic experiment") },
+  });
+  cleanup.push(() => prisma.experiment.delete({ where: { id: experiment.id } }));
+  const arm = await prisma.experimentArm.create({
+    data: { experimentId: experiment.id, name: "control", weight: 50 },
+  });
+  cleanup.push(() => prisma.experimentArm.delete({ where: { id: arm.id } }));
+
+  const result = await validateTrackingLinkConfig(prisma, {
+    trackingLinkId: link.id,
+    campaignId: campaign.id,
+    socialAccountId: null,
+    pathType: PathType.DIRECT,
+    destinationUrl: "https://acme.example/offer",
+    ageGateEnabled: false,
+    experimentId: experiment.id,
+    experimentArmId: arm.id,
+  });
+
+  assert.equal(result.valid, true);
 });

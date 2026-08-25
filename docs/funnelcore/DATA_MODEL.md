@@ -15,7 +15,8 @@ Brand ──< Domain
 Brand ──< Campaign
 Brand ──< TelegramBot
 Brand ──< ApiConnection
-Brand ──< Experiment ──< ExperimentArm >── TrackingLinkVersion (optional)
+Brand ──< Experiment (optional) >── Platform (optional)
+Experiment ──< ExperimentArm >── TrackingLinkVersion (optional)
 Brand ──< TrackingLink >── Domain
 
 TrackingLink ──< TrackingLinkVersion >── Campaign
@@ -191,34 +192,48 @@ not code.
 | createdAt / updatedAt | DateTime | |
 
 ### Experiment
-Placeholder entity for A/B-style experimentation across tracking link versions. Intentionally
-minimal in V1 — see OPEN_QUESTIONS.md. Per-variant detail lives in `ExperimentArm`;
-`variantConfig` here is free-form experiment-level metadata only (e.g. hypothesis notes).
+The V1 "aggregator vs Telegram" experiment framework (see DECISIONS.md for the milestone that
+built this out from the earlier placeholder). An Experiment is just a named grouping of
+`ExperimentArm`s; brand and platform are optional descriptive scoping metadata, not enforced
+against the arms' actual tracking links beyond the brand check described below.
+`variantConfig` remains free-form experiment-level metadata (e.g. hypothesis notes).
 
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
-| brandId | String | FK → Brand |
-| trackingLinkId | String? | FK → TrackingLink, optional |
+| brandId | String? | FK → Brand, optional |
+| platformId | String? | FK → Platform, optional |
 | name | String | |
+| successMetric | ExperimentSuccessMetric | which dashboard metric this experiment cares about — display emphasis only, never used to auto-select a winner |
 | variantConfig | Json? | experiment-level metadata, shape TBD |
 | status | Status | |
-| startedAt / endedAt | DateTime? | |
+| startedAt / endedAt | DateTime? | descriptive only — not enforced against publish time |
 | createdAt / updatedAt | DateTime | |
 
 ### ExperimentArm
 A single variant within an Experiment. A real table (not JSON) because arms are queried/
-joined directly once traffic-split execution is built.
+joined directly for reporting (see `lib/attribution-report.ts`'s `buildExperimentArmReport`).
 
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
 | experimentId | String | FK → Experiment |
-| name | String | e.g. `"control"`, `"variant-b"` |
-| trackingLinkVersionId | String? | FK → TrackingLinkVersion — which version this arm serves |
-| weight | Int | relative traffic allocation |
+| name | String | e.g. `"Aggregator"`, `"Telegram"` |
+| trackingLinkVersionId | String? | FK → TrackingLinkVersion — set automatically by publishing that version with this arm selected (see below); this is the *only* way an arm gets wired to a tracking link in V1 |
+| weight | Int | relative traffic allocation — stored but not acted on; V1 has no automatic traffic splitting |
 | status | Status | |
 | createdAt / updatedAt | DateTime | |
+
+**Assigning a tracking link to an arm (V1, manual):** publish a `TrackingLinkVersion` (see
+`lib/tracking-link-publishing.ts`) with `experimentId`/`experimentArmId` selected — the publish
+transaction sets that arm's `trackingLinkVersionId` to the newly published version, after
+validating the arm/experiment are active and (if the experiment declares a `brandId`) that it
+matches the link's brand. There is no separate "assign" admin action and no constraint tying an
+experiment to a single link — different arms of the same experiment are expected to point at
+different tracking links (e.g. an `AGGREGATOR`-path link for one arm, a `TELEGRAM`-path link for
+another), which is exactly the "aggregator vs Telegram" scenario this framework exists for.
+Re-publishing a link without re-selecting the same arm leaves that arm's `trackingLinkVersionId`
+pointing at the older version — an accepted V1 tradeoff of manual assignment, not a bug.
 
 Unique on `(experimentId, name)`.
 
@@ -369,6 +384,9 @@ left null; the row is never dropped (CLAUDE.md rule 8).
   value is a developer/architecture change, not an admin action.
 - `FunnelStepType`: see Click/FunnelEvent above.
 - `ConversionStatus`: `PENDING`, `CONFIRMED`, `REVERSED`.
+- `ExperimentSuccessMetric`: `CLICKS`, `AGE_GATE_ACCEPTS`, `AGGREGATOR_VIEWS`, `TELEGRAM_STARTS`,
+  `OUTBOUND_REDIRECTS`, `SIGNUPS` — the fixed set of metrics the attribution dashboard already
+  computes; display emphasis only, never drives automatic winner selection.
 - `AdminRole`: `ADMIN`, `VIEWER`.
 
 ## 4. Design rules this schema follows

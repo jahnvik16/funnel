@@ -1,22 +1,16 @@
 "use client";
 
 import { useActionState } from "react";
-import type { Brand } from "@prisma/client";
+import type { Brand, Platform } from "@prisma/client";
+import { ExperimentSuccessMetric } from "@prisma/client";
 import { ui } from "@/lib/ui";
 import { SubmitButton } from "../_components/SubmitButton";
+import { SUCCESS_METRIC_LABELS } from "./successMetricLabels";
 import { createExperiment, type FormState } from "./actions";
 
 const initialState: FormState = {};
 
-type TrackingLinkOption = { id: string; label: string; token: string };
-
-export function NewExperimentForm({
-  brands,
-  trackingLinks,
-}: {
-  brands: Brand[];
-  trackingLinks: TrackingLinkOption[];
-}) {
+export function NewExperimentForm({ brands, platforms }: { brands: Brand[]; platforms: Platform[] }) {
   const [state, formAction] = useActionState(createExperiment, initialState);
 
   return (
@@ -24,11 +18,9 @@ export function NewExperimentForm({
       <h2 className={ui.sectionTitle}>New experiment</h2>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label className={ui.label}>
-          Brand
-          <select name="brandId" required className={ui.select} defaultValue="">
-            <option value="" disabled>
-              Select a brand
-            </option>
+          Brand (optional)
+          <select name="brandId" className={ui.select} defaultValue="">
+            <option value="">All brands</option>
             {brands.map((brand) => (
               <option key={brand.id} value={brand.id}>
                 {brand.name}
@@ -38,19 +30,30 @@ export function NewExperimentForm({
           </select>
         </label>
         <label className={ui.label}>
-          Tracking link (optional)
-          <select name="trackingLinkId" className={ui.select} defaultValue="">
-            <option value="">None</option>
-            {trackingLinks.map((link) => (
-              <option key={link.id} value={link.id}>
-                {link.label} ({link.token})
+          Platform (optional)
+          <select name="platformId" className={ui.select} defaultValue="">
+            <option value="">All platforms</option>
+            {platforms.map((platform) => (
+              <option key={platform.id} value={platform.id}>
+                {platform.name}
+                {platform.status === "ARCHIVED" ? " (archived)" : ""}
               </option>
             ))}
           </select>
         </label>
         <label className={ui.label}>
           Name
-          <input name="name" required className={ui.input} />
+          <input name="name" required placeholder="Aggregator vs Telegram" className={ui.input} />
+        </label>
+        <label className={ui.label}>
+          Success metric
+          <select name="successMetric" required className={ui.select} defaultValue={ExperimentSuccessMetric.OUTBOUND_REDIRECTS}>
+            {Object.values(ExperimentSuccessMetric).map((metric) => (
+              <option key={metric} value={metric}>
+                {SUCCESS_METRIC_LABELS[metric]}
+              </option>
+            ))}
+          </select>
         </label>
         <label className={ui.label}>
           Started at (optional)

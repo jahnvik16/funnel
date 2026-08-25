@@ -2,7 +2,7 @@
 
 import { z } from "zod";
 import { redirect } from "next/navigation";
-import { Prisma } from "@prisma/client";
+import { Prisma, ExperimentSuccessMetric } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/guard";
 import { writeAuditLog } from "@/lib/audit";
@@ -17,9 +17,10 @@ function isValidJson(value: string): boolean {
 }
 
 const experimentSchema = z.object({
-  brandId: z.string().trim().min(1, "Brand is required."),
-  trackingLinkId: z.string().trim().optional().transform((v) => (v ? v : null)),
+  brandId: z.string().trim().optional().transform((v) => (v ? v : null)),
+  platformId: z.string().trim().optional().transform((v) => (v ? v : null)),
   name: z.string().trim().min(1, "Name is required."),
+  successMetric: z.nativeEnum(ExperimentSuccessMetric),
   variantConfig: z
     .string()
     .trim()
@@ -39,8 +40,9 @@ export async function createExperiment(
   const admin = await requireAdmin();
   const parsed = experimentSchema.safeParse({
     brandId: formData.get("brandId"),
-    trackingLinkId: formData.get("trackingLinkId"),
+    platformId: formData.get("platformId"),
     name: formData.get("name"),
+    successMetric: formData.get("successMetric"),
     variantConfig: formData.get("variantConfig"),
     startedAt: formData.get("startedAt"),
     endedAt: formData.get("endedAt"),
@@ -73,8 +75,9 @@ export async function updateExperiment(
   const id = String(formData.get("id"));
   const parsed = experimentSchema.safeParse({
     brandId: formData.get("brandId"),
-    trackingLinkId: formData.get("trackingLinkId"),
+    platformId: formData.get("platformId"),
     name: formData.get("name"),
+    successMetric: formData.get("successMetric"),
     variantConfig: formData.get("variantConfig"),
     startedAt: formData.get("startedAt"),
     endedAt: formData.get("endedAt"),
@@ -129,10 +132,14 @@ export async function unarchiveExperiment(formData: FormData): Promise<void> {
 
 // --- Experiment arms -------------------------------------------------------
 
+// No trackingLinkVersionId here — an arm's tracking link is set by
+// publishing that link with this experiment/arm selected (see
+// lib/tracking-link-publishing.ts), which runs the full validation the
+// publish flow already requires (brand match, active status, etc.). Letting
+// arm creation set it directly would bypass all of that.
 const armSchema = z.object({
   experimentId: z.string().trim().min(1),
   name: z.string().trim().min(1, "Name is required."),
-  trackingLinkVersionId: z.string().trim().optional().transform((v) => (v ? v : null)),
   weight: z.coerce.number().int().min(0, "Weight must be zero or greater."),
 });
 
@@ -144,7 +151,6 @@ export async function createExperimentArm(
   const parsed = armSchema.safeParse({
     experimentId: formData.get("experimentId"),
     name: formData.get("name"),
-    trackingLinkVersionId: formData.get("trackingLinkVersionId"),
     weight: formData.get("weight"),
   });
   if (!parsed.success) {

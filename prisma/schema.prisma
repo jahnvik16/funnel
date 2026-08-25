@@ -67,6 +67,20 @@ enum ApiConnectionAuthType {
   BASIC_AUTH
 }
 
+// The fixed, small set of metrics the attribution dashboard already computes
+// (see lib/attribution-report.ts) — an experiment's "success metric" points
+// at one of these for display emphasis only. No automatic winner selection
+// is computed from it (see DECISIONS.md for the "aggregator vs Telegram
+// experiment framework" milestone's explicit V1 scope limits).
+enum ExperimentSuccessMetric {
+  CLICKS
+  AGE_GATE_ACCEPTS
+  AGGREGATOR_VIEWS
+  TELEGRAM_STARTS
+  OUTBOUND_REDIRECTS
+  SIGNUPS
+}
+
 // ---------------------------------------------------------------------------
 // Admin / audit
 // ---------------------------------------------------------------------------
@@ -156,6 +170,7 @@ model Platform {
   socialAccounts SocialAccount[]
   clicks         Click[]
   campaigns      Campaign[]
+  experiments    Experiment[]
 
   @@map("platforms")
 }
@@ -280,13 +295,20 @@ model ApiConnection {
   @@map("api_connections")
 }
 
+// V1 "aggregator vs Telegram" experiment framework: an Experiment is just a
+// named grouping of ExperimentArms, each manually wired to a TrackingLink by
+// selecting the experiment+arm while publishing that link's version (see
+// lib/tracking-link-publishing.ts). No brand/platform enforcement is done
+// against the arms' actual tracking links — both fields are descriptive
+// scoping metadata only, matching "keep V1 intentionally simple."
 model Experiment {
   id             String    @id @default(cuid())
-  brandId        String
-  brand          Brand     @relation(fields: [brandId], references: [id])
-  trackingLinkId String?
-  trackingLink   TrackingLink? @relation(fields: [trackingLinkId], references: [id])
+  brandId        String?
+  brand          Brand?    @relation(fields: [brandId], references: [id])
+  platformId     String?
+  platform       Platform? @relation(fields: [platformId], references: [id])
   name           String
+  successMetric  ExperimentSuccessMetric @default(OUTBOUND_REDIRECTS)
   variantConfig  Json?
   status         Status    @default(ACTIVE)
   startedAt      DateTime?
@@ -339,7 +361,6 @@ model TrackingLink {
 
   versions    TrackingLinkVersion[] @relation("VersionsOfLink")
   clicks      Click[]
-  experiments Experiment[]
 
   @@unique([domainId, token])
   @@map("tracking_links")

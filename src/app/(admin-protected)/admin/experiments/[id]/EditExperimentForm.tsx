@@ -1,14 +1,14 @@
 "use client";
 
 import { useActionState } from "react";
-import type { Brand, Experiment } from "@prisma/client";
+import type { Brand, Experiment, Platform } from "@prisma/client";
+import { ExperimentSuccessMetric } from "@prisma/client";
 import { ui } from "@/lib/ui";
 import { SubmitButton } from "../../_components/SubmitButton";
+import { SUCCESS_METRIC_LABELS } from "../successMetricLabels";
 import { updateExperiment, type FormState } from "../actions";
 
 const initialState: FormState = {};
-
-type TrackingLinkOption = { id: string; label: string; token: string };
 
 function toDateInputValue(date: Date | null): string {
   return date ? date.toISOString().slice(0, 10) : "";
@@ -17,11 +17,11 @@ function toDateInputValue(date: Date | null): string {
 export function EditExperimentForm({
   experiment,
   brands,
-  trackingLinks,
+  platforms,
 }: {
   experiment: Experiment;
   brands: Brand[];
-  trackingLinks: TrackingLinkOption[];
+  platforms: Platform[];
 }) {
   const [state, formAction] = useActionState(updateExperiment, initialState);
 
@@ -30,8 +30,9 @@ export function EditExperimentForm({
       <input type="hidden" name="id" value={experiment.id} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label className={ui.label}>
-          Brand
-          <select name="brandId" required className={ui.select} defaultValue={experiment.brandId}>
+          Brand (optional)
+          <select name="brandId" className={ui.select} defaultValue={experiment.brandId ?? ""}>
+            <option value="">All brands</option>
             {brands.map((brand) => (
               <option key={brand.id} value={brand.id}>
                 {brand.name}
@@ -41,16 +42,13 @@ export function EditExperimentForm({
           </select>
         </label>
         <label className={ui.label}>
-          Tracking link (optional)
-          <select
-            name="trackingLinkId"
-            className={ui.select}
-            defaultValue={experiment.trackingLinkId ?? ""}
-          >
-            <option value="">None</option>
-            {trackingLinks.map((link) => (
-              <option key={link.id} value={link.id}>
-                {link.label} ({link.token})
+          Platform (optional)
+          <select name="platformId" className={ui.select} defaultValue={experiment.platformId ?? ""}>
+            <option value="">All platforms</option>
+            {platforms.map((platform) => (
+              <option key={platform.id} value={platform.id}>
+                {platform.name}
+                {platform.status === "ARCHIVED" ? " (archived)" : ""}
               </option>
             ))}
           </select>
@@ -58,6 +56,16 @@ export function EditExperimentForm({
         <label className={ui.label}>
           Name
           <input name="name" required defaultValue={experiment.name} className={ui.input} />
+        </label>
+        <label className={ui.label}>
+          Success metric
+          <select name="successMetric" required className={ui.select} defaultValue={experiment.successMetric}>
+            {Object.values(ExperimentSuccessMetric).map((metric) => (
+              <option key={metric} value={metric}>
+                {SUCCESS_METRIC_LABELS[metric]}
+              </option>
+            ))}
+          </select>
         </label>
         <label className={ui.label}>
           Started at (optional)
