@@ -136,12 +136,18 @@ paid-acquisition lane in Paybig.
 |---|---|---|
 | id | String | PK |
 | brandId | String | FK → Brand |
+| platformId | String | FK → Platform |
 | name | String | internal label |
-| paybigCampaignRef | String | Paybig's identifier for this lane |
+| slug | String | unique per brand |
+| paybigUrl | String | the Paybig destination URL for this lane |
+| isDefault | Boolean | fallback campaign for this brand+platform — see below |
 | status | Status | |
 | createdAt / updatedAt | DateTime | |
 
-Unique on `(brandId, paybigCampaignRef)`.
+Unique on `(brandId, slug)`. At most one `ACTIVE` campaign per `(brandId, platformId)` may have
+`isDefault = true` — enforced at the application layer (setting a new default demotes any
+existing one in the same transaction; archiving a default campaign clears its flag), not as a
+DB constraint. See DECISIONS.md D011.
 
 ### TelegramBot
 Telegram credentials are secrets and are encrypted at rest (see ARCHITECTURE.md §6).
@@ -151,10 +157,15 @@ Telegram credentials are secrets and are encrypted at rest (see ARCHITECTURE.md 
 | id | String | PK |
 | brandId | String | FK → Brand |
 | name | String | internal label |
-| botUsername | String | not secret, safe to display |
+| botUsername | String? | not secret; null until the real Telegram integration derives it via `getMe` |
 | botTokenCiphertext | String | AES-256-GCM ciphertext; decrypted only server-side at point of use |
+| welcomeMessage | String? | shown by the bot after `/start` (Phase 4) |
+| ctaLabel | String? | button label used by the bot (Phase 4) |
 | status | Status | |
 | createdAt / updatedAt | DateTime | |
+
+Bot tokens are validated for *format* only at admin-entry time (see DECISIONS.md D012) — no
+live call to Telegram's API is made in this milestone.
 
 ### ApiConnection
 Generic external API credential holder (Paybig today, others later) without hardcoding a
@@ -167,6 +178,8 @@ not code.
 | brandId | String? | null = account-wide connection |
 | name | String | internal label |
 | provider | String | e.g. `"paybig"` |
+| baseUrl | String | base URL for the external API |
+| authType | ApiConnectionAuthType | `NONE \| API_KEY_HEADER \| API_KEY_QUERY \| BEARER_TOKEN \| BASIC_AUTH` — a fixed enum, unlike `provider`, because the (not-yet-built) integration layer branches on it structurally |
 | credentialsCiphertext | String | AES-256-GCM ciphertext of a JSON credential blob |
 | status | Status | |
 | createdAt / updatedAt | DateTime | |
@@ -210,8 +223,9 @@ of these rows. The link itself is a stable pointer; behavior lives in its versio
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
-| token | String | unique, used in `/l/{token}` |
-| brandId | String | FK → Brand |
+| label | String | human-readable name; not used in routing |
+| token | String | unique, used in `/l/{token}`, immutable after creation (see DECISIONS.md D013) |
+| brandId | String | FK → Brand, immutable after creation |
 | domainId | String | FK → Domain |
 | currentVersionId | String? | FK → TrackingLinkVersion, null until first publish |
 | status | LinkStatus | `ACTIVE \| PAUSED \| ARCHIVED` |

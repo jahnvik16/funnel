@@ -54,6 +54,14 @@ enum AdminRole {
   VIEWER
 }
 
+enum ApiConnectionAuthType {
+  NONE
+  API_KEY_HEADER
+  API_KEY_QUERY
+  BEARER_TOKEN
+  BASIC_AUTH
+}
+
 // ---------------------------------------------------------------------------
 // Admin / audit
 // ---------------------------------------------------------------------------
@@ -142,6 +150,7 @@ model Platform {
 
   socialAccounts SocialAccount[]
   clicks         Click[]
+  campaigns      Campaign[]
 
   @@map("platforms")
 }
@@ -180,20 +189,27 @@ model Domain {
 }
 
 model Campaign {
-  id                String   @id @default(cuid())
-  brandId           String
-  brand             Brand    @relation(fields: [brandId], references: [id])
-  name              String
-  paybigCampaignRef String
-  status            Status   @default(ACTIVE)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id         String   @id @default(cuid())
+  brandId    String
+  brand      Brand    @relation(fields: [brandId], references: [id])
+  platformId String
+  platform   Platform @relation(fields: [platformId], references: [id])
+  name       String
+  slug       String
+  paybigUrl  String
+  // At most one ACTIVE default per (brandId, platformId), enforced at the
+  // application layer (see lib/campaigns.ts) — not a DB constraint, same
+  // tradeoff as the pathConfig/telegramBotId consistency rule (D005/OPEN_QUESTIONS).
+  isDefault  Boolean  @default(false)
+  status     Status   @default(ACTIVE)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   trackingLinkVersions TrackingLinkVersion[]
   clicks               Click[]
   conversions          Conversion[]
 
-  @@unique([brandId, paybigCampaignRef])
+  @@unique([brandId, slug])
   @@map("campaigns")
 }
 
@@ -202,8 +218,13 @@ model TelegramBot {
   brandId            String
   brand              Brand    @relation(fields: [brandId], references: [id])
   name               String
-  botUsername        String
+  // Populated later by the real Telegram integration (getMe); admin-entered
+  // token format is validated at the application layer in this milestone,
+  // no live Telegram API call is made.
+  botUsername        String?
   botTokenCiphertext String
+  welcomeMessage     String?
+  ctaLabel           String?
   status             Status   @default(ACTIVE)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -232,15 +253,17 @@ model TelegramStartPayload {
 }
 
 model ApiConnection {
-  id                     String   @id @default(cuid())
-  brandId                String?
-  brand                  Brand?   @relation(fields: [brandId], references: [id])
-  name                   String
-  provider               String
-  credentialsCiphertext  String
-  status                 Status   @default(ACTIVE)
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  id                    String   @id @default(cuid())
+  brandId               String?
+  brand                 Brand?   @relation(fields: [brandId], references: [id])
+  name                  String
+  provider              String
+  baseUrl               String
+  authType              ApiConnectionAuthType @default(NONE)
+  credentialsCiphertext String
+  status                Status   @default(ACTIVE)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@map("api_connections")
 }
@@ -289,6 +312,7 @@ model ExperimentArm {
 
 model TrackingLink {
   id                String   @id @default(cuid())
+  label             String
   token             String   @unique
   brandId           String
   brand             Brand    @relation(fields: [brandId], references: [id])

@@ -39,26 +39,30 @@ Explicitly **not** in this milestone: entity CRUD, the public `/l/[token]` route
 webhook, Paybig ingestion, reporting, `lib/crypto` field-level encryption implementation
 (the ciphertext columns exist in the schema; nothing encrypts/decrypts them yet).
 
-## Phase 1b — Core config CRUD (Brand/Platform/Domain)
+## Phase 1b/2/3 — Full admin configuration CRUD (done together, not phased as originally planned)
 
-- CRUD (create/edit/archive) for `Brand`, `Platform`, `Domain`.
-- Shared mutation helper that enforces `AuditLog` writes on every create/update/archive.
-- Admin shell UI (list + detail + form) using shadcn/ui, built on the Phase 1a shell.
+The next milestone's brief asked for the complete admin control panel in one pass rather than
+split across Brand/Platform/Domain → Campaigns/Telegram/API → TrackingLink as originally
+sequenced here. Delivered together:
 
-## Phase 2 — Social accounts, campaigns, Telegram bots, API connections
-
-- CRUD for `SocialAccount`, `Campaign` (Paybig lane), `TelegramBot`, `ApiConnection`.
-- Implement `lib/crypto` field-level encryption; wire it into `TelegramBot.botTokenCiphertext`
-  and `ApiConnection.credentialsCiphertext`. No plaintext secret ever leaves the server.
-- Decide and document the Paybig integration contract (see OPEN_QUESTIONS.md) enough to know
-  what a `Campaign.paybigCampaignRef` needs to hold.
-
-## Phase 3 — TrackingLink + versioning + publish flow
-
-- CRUD for `TrackingLink` (create as draft, no live behavior until first publish).
-- Publish flow: build a `TrackingLinkVersion` from the admin form, write it + update
-  `TrackingLink.currentVersionId` in one transaction.
-- Version history view (read-only list of past versions per link).
+- [x] CRUD (create/edit/archive-or-deactivate) for `Brand`, `Platform`, `SocialAccount`,
+      `Domain`, `Campaign`, `TelegramBot`, `ApiConnection`, `Experiment`, `ExperimentArm`.
+- [x] `lib/audit.ts` shared mutation helper (`writeAuditLog` + `redactSecretFields`), called
+      inside the same transaction as every create/update/archive across all entity actions.
+- [x] `lib/crypto.ts` AES-256-GCM field-level encryption, wired into
+      `TelegramBot.botTokenCiphertext` and `ApiConnection.credentialsCiphertext`. Neither
+      ciphertext column is ever selected into a page/component (`selects.ts` per entity) or
+      written into an `AuditLog` row unredacted.
+- [x] `lib/telegram.ts` format-only bot token validation (see DECISIONS.md D012 — no live
+      Telegram API call in this milestone).
+- [x] `TrackingLink` CRUD (label/domain/status editable, brand/token fixed at creation — D013)
+      plus a publish flow: builds a `TrackingLinkVersion`, updates
+      `TrackingLink.currentVersionId`, and optionally attaches the new version to an existing
+      `ExperimentArm`, all in one transaction with an audit log entry.
+- [x] Admin nav shell linking all nine list pages.
+- Not resolved by this milestone: the Paybig integration contract (still open — see
+  OPEN_QUESTIONS.md); `Campaign.paybigCampaignRef` was replaced with `paybigUrl` (a direct
+  destination URL) per the updated brief, which sidesteps needing that contract decided yet.
 
 ## Phase 4 — Public route + click logging + funnel events
 
@@ -83,11 +87,13 @@ webhook, Paybig ingestion, reporting, `lib/crypto` field-level encryption implem
 - Funnel step drop-off (gate shown → passed → redirected → converted).
 - Paid-conversion attribution report answering the core business question directly.
 
-## Phase 7 — Experiments (if still needed)
+## Phase 7 — Experiment execution (if still needed)
 
-- Only after Phase 6 ships and the team confirms experiments are still wanted for V1 — the
-  `Experiment` entity is deliberately underspecified until there's a concrete use case (see
-  OPEN_QUESTIONS.md). Do not build a generic experimentation framework speculatively.
+`Experiment`/`ExperimentArm` CRUD and arm-to-version assignment already exist (Phase 1b/2/3).
+What's still undone, and only worth building after Phase 6 ships and the team confirms it's
+still wanted for V1: actually splitting public traffic across an experiment's arms inside the
+`/l/[token]` route (currently that route doesn't exist yet — see Phase 4). Do not build a
+generic experimentation framework speculatively.
 
 ## Sequencing notes
 

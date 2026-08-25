@@ -56,12 +56,11 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   logic) until there's a real scenario to design against — see IMPLEMENTATION_PLAN.md
   Phase 7. Do not build this out speculatively.
 
-## `pathConfig` / `telegramBotId` consistency
-- `TrackingLinkVersion.telegramBotId` should be set if and only if `pathType = TELEGRAM`, and
-  `pathConfig`'s shape depends on `pathType`. V1 does not enforce this at the database level
-  (Prisma has no native discriminated-union column support). Decide in Phase 3 whether to
-  add a Postgres `CHECK` constraint via raw SQL migration, or rely solely on
-  application-layer (Zod or similar) validation at publish time.
+## `pathConfig` / `telegramBotId` consistency — resolved
+- Decided in the Phase 1b/2/3 admin CRUD milestone: enforced at the application layer only
+  (a Zod `superRefine` in the publish Server Action requires `destinationUrl` for
+  `direct`/`aggregator` and `telegramBotId` for `telegram`), not a Postgres `CHECK`
+  constraint. No DB-level enforcement exists — a direct SQL write could still violate this.
 
 ## Reporting
 - What's the expected query volume/retention window for `Click`/`FunnelEvent`? Affects

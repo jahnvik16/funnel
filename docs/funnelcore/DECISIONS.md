@@ -96,3 +96,40 @@ v23.11.1 — the machine's installed runtime — because Prisma 7's supported en
 `node >=18.18` with no upper-bound gate and installs cleanly. This is a pin to keep local
 dev working, not an architectural preference for 6.x over 7.x — revisit once the local/CI
 Node version moves to 22 LTS or 24, or once a Prisma 7.x patch relaxes the gate.
+
+## D011 — Campaign default/fallback flag enforced at the application layer
+**Date:** 2026-08-25
+`Campaign.isDefault` should hold for at most one `ACTIVE` campaign per `(brandId, platformId)`.
+Postgres has no native "unique where condition" support through Prisma's schema DSL (it would
+need a raw-SQL partial unique index), so this is enforced in `tracking-links/../campaigns/
+actions.ts`: setting a campaign's `isDefault` to true demotes any other campaign in the same
+brand+platform inside the same transaction (with its own audit log entry), and archiving a
+default campaign clears its flag. Same tradeoff class as D005's pathConfig/telegramBotId
+consistency note — see OPEN_QUESTIONS.md.
+
+## D012 — Telegram bot token validated for format only, not via a live Telegram API call
+**Date:** 2026-08-25
+The admin config milestone requires the backend to "validate the token." A live call to
+Telegram's `getMe` endpoint is integration work, explicitly out of scope ("Do not implement
+the actual external API integrations yet"). `lib/telegram.ts` checks the token against
+Telegram's known format (`<digits>:<35-char secret>`) instead. `TelegramBot.botUsername` is
+therefore nullable — it stays unset until a real integration derives it from the API. Revisit
+when Phase 4 (public route / telegram path execution) is built.
+
+## D013 — TrackingLink `token` and `brandId` are immutable after creation
+**Date:** 2026-08-25
+`token` is the public URL key — changing it after a link has been shared would break every
+already-distributed link. `brandId` scopes which campaigns/social accounts/domains are valid
+selections for the link; changing it after creation would silently invalidate previously
+published versions' campaign/social-account references. Both are set once at creation and
+shown read-only thereafter; `label`, `domainId`, and `status` remain editable.
+
+## D014 — Prisma Server Action files can only export async functions; safe `select` shapes moved out
+**Date:** 2026-08-25
+Next.js rejects a `"use server"` file that exports anything other than an async function (a
+build-time check). The `TELEGRAM_BOT_SAFE_SELECT` / `API_CONNECTION_SAFE_SELECT` constants
+(the Prisma `select` shapes that guarantee `botTokenCiphertext`/`credentialsCiphertext` are
+never fetched for any page/component — see ARCHITECTURE.md `lib/auth` row and CLAUDE.md rule
+11) were moved into sibling `selects.ts` files rather than living alongside the actions that
+use them. Purely a module-boundary consequence of the framework constraint, not a design
+change to what the constants do.
