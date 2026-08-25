@@ -1,0 +1,407 @@
+// FunnelCore Prisma schema.
+// See docs/funnelcore/DATA_MODEL.md for the authoritative, prose description of this schema.
+// If the two ever disagree, THIS file is the source of truth for the database.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Status {
+  ACTIVE
+  ARCHIVED
+}
+
+enum LinkStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum PathType {
+  DIRECT
+  AGGREGATOR
+  TELEGRAM
+}
+
+enum FunnelStepType {
+  GATE_SHOWN
+  GATE_PASSED
+  GATE_FAILED
+  REDIRECT_DIRECT
+  REDIRECT_AGGREGATOR
+  REDIRECT_TELEGRAM
+  TELEGRAM_START
+  PAYBIG_REDIRECT
+}
+
+enum ConversionStatus {
+  PENDING
+  CONFIRMED
+  REVERSED
+}
+
+enum AdminRole {
+  ADMIN
+  VIEWER
+}
+
+// ---------------------------------------------------------------------------
+// Admin / audit
+// ---------------------------------------------------------------------------
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         AdminRole @default(ADMIN)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs        AuditLog[]
+  publishedVersions TrackingLinkVersion[]
+  sessions          Session[]
+
+  @@map("admin_users")
+}
+
+// Server-side session record backing the admin's HTTP-only session cookie.
+// The cookie carries only an opaque random token; tokenHash is the only copy
+// stored, so a database read alone can never yield a usable session token —
+// the same principle applied to password/credential storage elsewhere here.
+model Session {
+  id            String    @id @default(cuid())
+  adminUserId   String
+  adminUser     AdminUser @relation(fields: [adminUserId], references: [id])
+  tokenHash     String    @unique
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+
+  @@index([adminUserId])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      AdminUser? @relation(fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String
+  beforeJson Json?
+  afterJson  Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Configuration entities (admin-managed, never hardcoded)
+// ---------------------------------------------------------------------------
+
+model Brand {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    Status   @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  socialAccounts SocialAccount[]
+  domains        Domain[]
+  campaigns      Campaign[]
+  telegramBots   TelegramBot[]
+  apiConnections ApiConnection[]
+  experiments    Experiment[]
+  trackingLinks  TrackingLink[]
+  clicks         Click[]
+  conversions    Conversion[]
+
+  @@map("brands")
+}
+
+model Platform {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    Status   @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  socialAccounts SocialAccount[]
+  clicks         Click[]
+
+  @@map("platforms")
+}
+
+model SocialAccount {
+  id          String   @id @default(cuid())
+  brandId     String
+  brand       Brand    @relation(fields: [brandId], references: [id])
+  platformId  String
+  platform    Platform @relation(fields: [platformId], references: [id])
+  handle      String
+  displayName String?
+  status      Status   @default(ACTIVE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  trackingLinkVersions TrackingLinkVersion[]
+  clicks               Click[]
+
+  @@unique([brandId, platformId, handle])
+  @@map("social_accounts")
+}
+
+model Domain {
+  id        String   @id @default(cuid())
+  hostname  String   @unique
+  brandId   String?
+  brand     Brand?   @relation(fields: [brandId], references: [id])
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trackingLinks TrackingLink[]
+
+  @@map("domains")
+}
+
+model Campaign {
+  id                String   @id @default(cuid())
+  brandId           String
+  brand             Brand    @relation(fields: [brandId], references: [id])
+  name              String
+  paybigCampaignRef String
+  status            Status   @default(ACTIVE)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  trackingLinkVersions TrackingLinkVersion[]
+  clicks               Click[]
+  conversions          Conversion[]
+
+  @@unique([brandId, paybigCampaignRef])
+  @@map("campaigns")
+}
+
+model TelegramBot {
+  id                 String   @id @default(cuid())
+  brandId            String
+  brand              Brand    @relation(fields: [brandId], references: [id])
+  name               String
+  botUsername        String
+  botTokenCiphertext String
+  status             Status   @default(ACTIVE)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  trackingLinkVersions TrackingLinkVersion[]
+  startPayloads        TelegramStartPayload[]
+
+  @@map("telegram_bots")
+}
+
+// An opaque token embedded in a `t.me/<bot>?start=<token>` deep link so a
+// Telegram bot start event can be traced back to the Click that produced it.
+// Written when the telegram path executor runs (Phase 4); schema only for now.
+model TelegramStartPayload {
+  id            String    @id @default(cuid())
+  clickId       String
+  click         Click     @relation(fields: [clickId], references: [id])
+  telegramBotId String
+  telegramBot   TelegramBot @relation(fields: [telegramBotId], references: [id])
+  payloadToken  String    @unique
+  createdAt     DateTime  @default(now())
+  consumedAt    DateTime?
+
+  @@index([clickId])
+  @@map("telegram_start_payloads")
+}
+
+model ApiConnection {
+  id                     String   @id @default(cuid())
+  brandId                String?
+  brand                  Brand?   @relation(fields: [brandId], references: [id])
+  name                   String
+  provider               String
+  credentialsCiphertext  String
+  status                 Status   @default(ACTIVE)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("api_connections")
+}
+
+model Experiment {
+  id             String    @id @default(cuid())
+  brandId        String
+  brand          Brand     @relation(fields: [brandId], references: [id])
+  trackingLinkId String?
+  trackingLink   TrackingLink? @relation(fields: [trackingLinkId], references: [id])
+  name           String
+  variantConfig  Json?
+  status         Status    @default(ACTIVE)
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  arms ExperimentArm[]
+
+  @@map("experiments")
+}
+
+// A single variant within an Experiment. Kept as its own table (rather than
+// folded into Experiment.variantConfig) because arms are queried/joined
+// directly once traffic-split execution is built in a later phase.
+model ExperimentArm {
+  id                    String    @id @default(cuid())
+  experimentId          String
+  experiment            Experiment @relation(fields: [experimentId], references: [id])
+  name                  String
+  trackingLinkVersionId String?
+  trackingLinkVersion   TrackingLinkVersion? @relation(fields: [trackingLinkVersionId], references: [id])
+  weight                Int
+  status                Status    @default(ACTIVE)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([experimentId, name])
+  @@map("experiment_arms")
+}
+
+// ---------------------------------------------------------------------------
+// TrackingLink / TrackingLinkVersion — the executable public route object
+// ---------------------------------------------------------------------------
+
+model TrackingLink {
+  id                String   @id @default(cuid())
+  token             String   @unique
+  brandId           String
+  brand             Brand    @relation(fields: [brandId], references: [id])
+  domainId          String
+  domain            Domain   @relation(fields: [domainId], references: [id])
+  currentVersionId  String?  @unique
+  currentVersion    TrackingLinkVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  status            LinkStatus @default(ACTIVE)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  versions    TrackingLinkVersion[] @relation("VersionsOfLink")
+  clicks      Click[]
+  experiments Experiment[]
+
+  @@map("tracking_links")
+}
+
+// Immutable once created. Never updated after publish — see ARCHITECTURE.md §5.
+model TrackingLinkVersion {
+  id               String   @id @default(cuid())
+  trackingLinkId   String
+  trackingLink     TrackingLink @relation("VersionsOfLink", fields: [trackingLinkId], references: [id])
+  versionNumber    Int
+  pathType         PathType
+  campaignId       String
+  campaign         Campaign @relation(fields: [campaignId], references: [id])
+  socialAccountId  String?
+  socialAccount    SocialAccount? @relation(fields: [socialAccountId], references: [id])
+  telegramBotId    String?
+  telegramBot      TelegramBot? @relation(fields: [telegramBotId], references: [id])
+  ageGateEnabled   Boolean  @default(false)
+  pathConfig       Json
+  publishedAt      DateTime @default(now())
+  publishedById    String
+  publishedBy      AdminUser @relation(fields: [publishedById], references: [id])
+
+  currentForLink TrackingLink? @relation("CurrentVersion")
+  clicks         Click[]
+  experimentArms ExperimentArm[]
+
+  @@unique([trackingLinkId, versionNumber])
+  @@map("tracking_link_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Attribution / funnel data
+// ---------------------------------------------------------------------------
+
+// Authoritative click record. Attribution fields are copied from the resolved
+// version at click time — never re-derived by joining live/mutable rows.
+model Click {
+  id                     String   @id @default(cuid())
+  trackingLinkId         String
+  trackingLink           TrackingLink @relation(fields: [trackingLinkId], references: [id])
+  trackingLinkVersionId  String
+  trackingLinkVersion    TrackingLinkVersion @relation(fields: [trackingLinkVersionId], references: [id])
+  brandId                String
+  brand                  Brand    @relation(fields: [brandId], references: [id])
+  platformId             String?
+  platform               Platform? @relation(fields: [platformId], references: [id])
+  socialAccountId        String?
+  socialAccount          SocialAccount? @relation(fields: [socialAccountId], references: [id])
+  campaignId             String?
+  campaign               Campaign? @relation(fields: [campaignId], references: [id])
+  ipHash                 String?
+  userAgent              String?
+  referrer               String?
+  utmParams              Json?
+  countryCode            String?
+  deviceType             String?
+  clickedAt              DateTime @default(now())
+
+  funnelEvents          FunnelEvent[]
+  conversions           Conversion[]
+  telegramStartPayloads TelegramStartPayload[]
+
+  @@index([trackingLinkId, clickedAt])
+  @@index([campaignId])
+  @@map("clicks")
+}
+
+model FunnelEvent {
+  id         String   @id @default(cuid())
+  clickId    String
+  click      Click    @relation(fields: [clickId], references: [id])
+  stepType   FunnelStepType
+  metadata   Json?
+  occurredAt DateTime @default(now())
+
+  @@index([clickId, occurredAt])
+  @@map("funnel_events")
+}
+
+// Paybig is authoritative for signups. This table records what Paybig told us
+// and how it was attributed — it does not recompute or override Paybig's data.
+model Conversion {
+  id                  String   @id @default(cuid())
+  paybigConversionId  String   @unique
+  clickId             String?
+  click               Click?   @relation(fields: [clickId], references: [id])
+  campaignId          String?
+  campaign            Campaign? @relation(fields: [campaignId], references: [id])
+  brandId             String?
+  brand               Brand?   @relation(fields: [brandId], references: [id])
+  amount              Decimal? @db.Decimal(12, 2)
+  currency            String?
+  status              ConversionStatus @default(PENDING)
+  occurredAt          DateTime
+  receivedAt          DateTime @default(now())
+  rawPayload          Json
+
+  @@index([clickId])
+  @@index([campaignId])
+  @@map("conversions")
+}

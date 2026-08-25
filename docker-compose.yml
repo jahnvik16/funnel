@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: funnelcore-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: funnelcore
+      POSTGRES_PASSWORD: funnelcore
+      POSTGRES_DB: funnelcore
+    ports:
+      - "5432:5432"
+    volumes:
+      - funnelcore_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U funnelcore -d funnelcore"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  funnelcore_postgres_data:
