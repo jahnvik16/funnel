@@ -70,9 +70,13 @@ This is not a generic workflow engine. The set of path types is fixed and small
 |---|---|---|
 | `app/(admin)` | Admin UI + Server Actions for CRUD, publish, audit view, reports | Contain per-brand/campaign conditional logic |
 | `app/l/[token]`, `app/gate/[clickId]`, `app/path/[clickId]`, `app/out/[clickId]` | The public funnel — resolve, gate, execute path, egress (see §4) | Contain any hardcoded brand/campaign/link behavior; join a live mutable row when the frozen `snapshot` already has the answer |
+| `app/api/telegram/webhook/[botId]` | Inbound Telegram webhook — `/start` handling (see §4a) | Require admin session auth (it's authenticated via the per-bot secret token instead); trust the payload without resolving it through `resolveTelegramStartPayload` |
 | `app/api/conversions` | Inbound Paybig conversion ingestion (not built yet — Phase 5) | Trust unverified payloads; must attribute via Campaign/Click, never guess |
 | `lib/public-routing` | Resolving `(domain, token)` → version, writing `Click`/`FunnelEvent`, the path/outbound decision logic | Depend on `next/headers` or any Next.js request/response type (must stay callable from tests without a request context, same reasoning as `lib/tracking-link-publishing`); re-query a live Campaign/SocialAccount/TelegramBot row when the snapshot already has what's needed |
-| `lib/crypto` | Field-level encryption/decryption for secrets (Telegram tokens, API credentials) | Ever return decrypted secrets to a client component or API response |
+| `lib/telegram` | Thin Telegram Bot API client (`getMe`, `setWebhook`, `sendMessage`) plus token format checking | Log a bot token or the request URL that embeds one; throw on a failed API call (returns a typed result instead) |
+| `lib/telegram-payload` | Minting and resolving short-lived Telegram start payloads | Encode click/campaign/link ids into the payload token itself; skip the expiry check |
+| `lib/telegram-webhook` | Webhook orchestration: verify secret, parse `/start`, resolve payload, log, reply | Hold a DB transaction open across the network call to Telegram's `sendMessage`; fail the whole webhook because the reply send failed |
+| `lib/crypto` | Field-level encryption/decryption for secrets (Telegram tokens, webhook secrets, API credentials) | Ever return decrypted secrets to a client component or API response |
 | `lib/audit` | Recording before/after diffs for admin mutations | Be optional / skippable by any mutation path |
 | `lib/auth` | Password hashing/verification, session issuance/validation/revocation | Store a plaintext password or a raw (unhashed) session token; trust a cookie value without checking it against `Session` |
 | `lib/tracking-link-publishing` | Validating a proposed TrackingLink configuration and, if valid, publishing an immutable `TrackingLinkVersion` with a frozen snapshot | Write anything when validation fails; depend on `next/headers`/`requireAdmin` (must stay callable from tests without a request context) |
@@ -104,19 +108,63 @@ is a thin wrapper):
    `DIRECT` redirects straight to `/out/{clickId}` (no interim page, no event of its own —
    the outbound event is logged at `/out`); `AGGREGATOR` writes `AGGREGATOR_VIEWED` and
    renders an owned, neutral page (brand/campaign name, a "Continue" link to
-   `/out/{clickId}`); anything else (i.e. `TELEGRAM` — not implemented in the public route
-   yet) writes `ROUTE_FAILED` and renders a safe, generic unavailable message.
+   `/out/{clickId}`); `TELEGRAM` mints a start payload and redirects into the bot (see §4a);
+   anything else (defensive-only — the schema has no other real value) writes `ROUTE_FAILED`
+   and renders a safe, generic unavailable message.
 4. **`GET /out/{clickId}`** (`app/out/[clickId]/route.ts`) — the single canonical egress
-   point for both `DIRECT` and `AGGREGATOR`. For `AGGREGATOR` it first writes
-   `AGGREGATOR_CONTINUE_CLICKED`, then resolves the destination URL from the snapshot's
-   `pathConfig` and writes `OUTBOUND_PAYBIG_REDIRECTED` before redirecting externally. **This
-   step is idempotent**: if a `OUTBOUND_PAYBIG_REDIRECTED` event already exists for the click
-   (e.g. a client-side redirect retry — observed in manual testing), it replays the same
-   destination from that event's metadata instead of writing a duplicate.
+   point for `DIRECT`, `AGGREGATOR`, and `TELEGRAM` alike. For `AGGREGATOR` it first writes
+   `AGGREGATOR_CONTINUE_CLICKED`. It then resolves the destination URL — from the snapshot's
+   `pathConfig` for `DIRECT`/`AGGREGATOR`, or from `snapshot.campaign.paybigUrl` for
+   `TELEGRAM` (which has no `pathConfig.destinationUrl` field — see DECISIONS.md D019/D025) —
+   and writes `OUTBOUND_PAYBIG_REDIRECTED` before redirecting externally. **This step is
+   idempotent**: if a `OUTBOUND_PAYBIG_REDIRECTED` event already exists for the click (e.g. a
+   client-side redirect retry — observed in manual testing), it replays the same destination
+   from that event's metadata instead of writing a duplicate.
 
 Downstream, the visitor may reach Paybig. Paybig eventually reports a conversion. Conversion
 ingestion (not built yet — Phase 5) attributes it to a `Click` using whatever join key Paybig
 provides; see OPEN_QUESTIONS.md.
+
+## 4a. The Telegram funnel path
+
+```
+/l/{token} → Click created (pathType TELEGRAM)
+           → /path/{clickId}: TelegramStartPayload minted, TELEGRAM_REDIRECTED written
+           → redirect to t.me/{botUsername}?start={payloadToken}
+           → visitor opens the bot in Telegram, which sends "/start {payloadToken}"
+           → POST /api/telegram/webhook/{botId}  (Telegram calling us)
+                → verify X-Telegram-Bot-Api-Secret-Token (if one is on file)
+                → resolveTelegramStartPayload(payloadToken)
+                → TELEGRAM_STARTED written (idempotent)
+                → sendMessage(welcomeMessage, CTA button → {APP_BASE_URL}/out/{clickId})
+           → visitor taps the CTA button inside Telegram
+           → GET /out/{clickId}  (same egress point as direct/aggregator)
+                → OUTBOUND_PAYBIG_REDIRECTED written
+                → redirect to snapshot.campaign.paybigUrl
+```
+
+**The payload is opaque and carries nothing itself.** `TelegramStartPayload.payloadToken` is
+a random string with no encoded meaning — resolving it (`lib/telegram-payload.ts`) is what
+recovers `click_id`, `trackingLinkId`, `trackingLinkVersionId`, `campaignId`, and (via a
+reverse lookup on `ExperimentArm.trackingLinkVersionId`) `experimentArmId`, all by joining
+through the already-resolved `Click` → `TrackingLinkVersion`. This is deliberate: even if a
+payload token leaked, it grants no information and (once expired or consumed past its TTL)
+resolves to nothing. Payloads expire 15 minutes after creation — see DECISIONS.md D023.
+
+**Publishing a `TELEGRAM` version requires a validated bot.** `TrackingLinkVersion.snapshot`
+includes `telegramBot.username`, and publishing is rejected if the chosen bot's
+`botUsername` is unset — i.e. the bot has never been successfully validated via the admin's
+**Validate** action (a live `getMe` call). This means a `TELEGRAM` path can never be
+published pointing at a bot whose real `@username` isn't known, which is what makes building
+the `t.me/{username}?start=...` deep link possible without a live API call on every click.
+
+**Webhook authenticity is checked "as far as practical", not enforced absolutely.**
+`TelegramBot.webhookSecretCiphertext` is set only once the admin's Validate action
+successfully calls `setWebhook` (which requires `APP_BASE_URL` to be a real, public HTTPS
+URL — it will not succeed against `http://localhost:3000`). Until then, the webhook accepts
+any request for that bot; once a secret is on file, the
+`X-Telegram-Bot-Api-Secret-Token` header must match exactly or the request is rejected with
+401. See DECISIONS.md D024.
 
 ## 5. Versioning & immutability model
 
@@ -168,10 +216,13 @@ CLAUDE.md rule 11/12.
 - **Admin auth**: simple session-based auth (credentials in Postgres, hashed with a strong
   KDF — e.g. bcrypt/argon2). No public sign-up; accounts are provisioned directly. See
   OPEN_QUESTIONS.md for whether/when SSO is needed.
-- **Secrets at rest**: `TelegramBot.botToken` and `ApiConnection.credentials` are stored as
-  ciphertext (AES-256-GCM, key from `ENCRYPTION_KEY` env var, never committed). Decryption
-  only happens server-side, only at the point of use (e.g. building a Telegram API call),
-  never in a response payload sent to any client.
+- **Secrets at rest**: `TelegramBot.botTokenCiphertext`, `TelegramBot.webhookSecretCiphertext`,
+  and `ApiConnection.credentialsCiphertext` are stored as ciphertext (AES-256-GCM, key from
+  `ENCRYPTION_KEY` env var, never committed). Decryption only happens server-side, only at
+  the point of use (building a Telegram API call, or checking an inbound webhook's secret
+  header), never in a response payload sent to any client, and never logged — see
+  `lib/telegram.test.ts`/`lib/telegram-webhook.test.ts` for tests that assert this directly by
+  spying on `console.*` during a failing call.
 - **Secrets never reach the frontend**: Server Components/Server Actions load and use
   decrypted secrets in-process only; client components only ever see non-secret fields
   (e.g. bot username, not bot token).

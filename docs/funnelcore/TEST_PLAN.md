@@ -31,9 +31,11 @@ fixtures and deletes them in an `after` hook; see that file's comments before ad
   `paybigUrl`; assert the published version's `snapshot.campaign.paybigUrl` is unchanged while
   the live `Campaign.paybigUrl` reflects the edit. Also assert the full `snapshot` JSON is
   byte-for-byte identical before and after (`assert.deepEqual`).
-- Validation rejection coverage: archived campaign, missing/inactive Telegram bot for the
-  `telegram` path type, social-account/tracking-link brand mismatch, experiment-arm/experiment
-  mismatch — each asserts zero rows written and the specific issue surfaced.
+- Validation rejection coverage: archived campaign, missing/inactive/unvalidated (no
+  `botUsername`) Telegram bot for the `telegram` path type, social-account/tracking-link
+  brand mismatch, experiment-arm/experiment mismatch — each asserts zero rows written and the
+  specific issue surfaced. A companion positive test confirms publish succeeds once the bot
+  *is* validated and that the snapshot's `telegramBot` carries the real username.
 - **Immutability regression**: create a click against version N, then publish version N+1;
   assert the original `Click` row's `trackingLinkVersionId` still points at N and reporting
   aggregates built from it are unchanged. *(Not yet implemented — no reporting queries exist
@@ -51,9 +53,13 @@ pattern — note its `deleteClick` helper, needed because `FunnelEvent` has a re
   matches the published `pathConfig.destinationUrl`.
 - Age gate: shown → accepted (and, separately, shown → declined) — click context (the click
   id itself) is confirmed to still resolve after the gate step.
-- Failure after a `Click` already exists: an unsupported (`TELEGRAM`) path type at `/path` and
-  at `/out` both fail safely and write `ROUTE_FAILED`; a corrupted/missing destination URL at
-  `/out` fails safely and writes `ROUTE_FAILED`.
+- `TELEGRAM` at `/path`: mints a start payload, returns the correct `t.me/{username}?start=`
+  deep link, and logs `TELEGRAM_REDIRECTED`; a corrupted snapshot with `telegramBot: null`
+  fails safely instead (defensive-only — publish-time validation should prevent this).
+- `TELEGRAM` at `/out`: uses `campaign.paybigUrl` as the destination (it has no
+  `pathConfig.destinationUrl`); a genuinely unrecognized `pathType` (forced via a type cast —
+  not reachable through real code, since the enum only has 3 values) still fails safely.
+- A corrupted/missing destination URL at `/out` fails safely and writes `ROUTE_FAILED`.
 - **Idempotency**: calling the `/out` logic three times for one click produces exactly one
   `OUTBOUND_PAYBIG_REDIRECTED` event and replays the same destination each time — this
   regression test exists because manual browser testing caught a real triplication (see
@@ -63,11 +69,38 @@ pattern — note its `deleteClick` helper, needed because `FunnelEvent` has a re
 - Audit logging: every CRUD mutation path produces exactly one `AuditLog` row with the
   correct before/after payload.
 
+`src/lib/telegram-payload.test.ts` covers payload creation, expiry, resolution, and
+attribution preservation: token opacity (never embeds click/campaign/link ids, asserted by
+substring check), TTL bounds, `not_found`/`expired` rejection, idempotent re-resolution, and
+correct `experimentArmId` derivation when an arm is attached to the version.
+
+`src/lib/telegram-webhook.test.ts` and `src/lib/telegram.test.ts` cover the Telegram API
+integration itself — token validation with a mocked Telegram API, using an injectable
+`fetch` implementation so no real Telegram credentials are needed for the automated suite:
+- `/start` parsing (with and without the `@botname` suffix, bare `/start`, unrelated text).
+- Webhook secret verification: permissive when unset, strict once configured.
+- Full webhook flow: resolves the payload, logs `TELEGRAM_STARTED` exactly once even across
+  repeated calls (Telegram may retry delivery), sends the CTA with the bot's configured
+  welcome message/label and the correct `/out/{clickId}` URL.
+- Failure paths: unknown bot, no `/start` payload, unknown/expired payload token.
+- **Never logs the bot token**: both files spy on `console.log`/`.error`/`.warn` during a
+  forced failure and assert none of the captured output contains the raw token — an
+  executable proof, not just a code-review claim.
+
+Manually verified against the *real* Telegram API in this milestone (see the session's
+transcript): a live `getMe` call against a deliberately fake token returned Telegram's actual
+`401 Unauthorized`, confirming the network integration itself works, not just the mocked
+tests. The full local funnel (`/l` → `/path` → simulated webhook POST → `/out`) was also
+exercised end-to-end with a manually-flagged "validated" bot, since no real bot token was
+available in this environment.
+
 ### Security-focused tests
 - A Server Action or API route that returns `TelegramBot` or `ApiConnection` data to a client
-  never includes `botTokenCiphertext` / `credentialsCiphertext` in the response shape, even
-  if a future field gets added carelessly (assert on an explicit allow-list of returned
-  fields, not just "doesn't crash").
+  never includes `botTokenCiphertext` / `webhookSecretCiphertext` / `credentialsCiphertext` in
+  the response shape, even if a future field gets added carelessly (assert on an explicit
+  allow-list of returned fields, not just "doesn't crash").
+- The Telegram webhook route rejects a mismatched `X-Telegram-Bot-Api-Secret-Token` once a
+  secret is on file for that bot (401), and never processes the update in that case.
 - Unauthenticated requests to any admin route/Server Action are rejected.
 - Conversion ingestion endpoint validates/authenticates the caller (mechanism TBD — see
   OPEN_QUESTIONS.md) and rejects unverified payloads.

@@ -14,6 +14,10 @@ export default async function PathPage({ params }: { params: Promise<{ clickId: 
     redirect(`/out/${clickId}`);
   }
 
+  if (result.ok && result.render === "redirect_telegram") {
+    redirect(result.deepLinkUrl);
+  }
+
   if (!result.ok) {
     return (
       <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-4 bg-zinc-50 p-8 text-center dark:bg-black">

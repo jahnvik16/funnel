@@ -83,7 +83,7 @@ sequenced here. Delivered together:
       including the critical invariant test: editing a campaign's `paybigUrl` after publishing
       does not change the already-published version's snapshot.
 
-## Phase 4 — Public route + click logging + funnel events (mostly done)
+## Phase 4 — Public route + click logging + funnel events (done except load testing)
 
 - [x] `GET /l/[token]` → `/gate/[clickId]` (optional) → `/path/[clickId]` → `/out/[clickId]`,
       exactly as designed: resolve `(domain, token)` → current version → write `Click` →
@@ -97,12 +97,30 @@ sequenced here. Delivered together:
       the brief's "do not add scene/session attribution").
 - [x] Idempotency for `/out` and the gate's accept/decline (D020) — found via manual testing,
       not originally planned, but necessary for correct event counts.
-- [ ] `telegram` path executor — explicitly deferred; a Telegram-path click fails safely
-      (`ROUTE_FAILED`, reason `unsupported_path_type`) rather than attempting a redirect with
-      no real destination. Revisit alongside the Telegram integration work in
-      OPEN_QUESTIONS.md.
+- [x] `telegram` path executor — done in the Telegram funnel path milestone below (Phase 4a).
 - [ ] Load test / sanity check the hot path for latency — not done. This is the one route
       real users hit directly from ads/social; do this before real traffic depends on it.
+
+## Phase 4a — Telegram funnel path (done)
+
+- [x] Live bot validation (`getMe`) replacing the format-only check from Phase 1b/2/3 — see
+      DECISIONS.md D022. Admin **Validate** action populates `botUsername` and best-effort
+      registers the webhook (`setWebhook`, D024).
+- [x] `TelegramStartPayload` actually used: minted at `/path/[clickId]` for `pathType =
+      TELEGRAM`, resolved by the webhook, opaque and short-lived (D023).
+- [x] `POST /api/telegram/webhook/[botId]` — verifies the per-bot secret "as far as
+      practical" (D024), parses `/start <payload>`, resolves attribution, logs
+      `TELEGRAM_STARTED` (idempotent), replies with the bot's welcome message + a CTA button
+      linking to `/out/{clickId}`.
+- [x] `/out/[clickId]` extended to accept `TELEGRAM`, using `campaign.paybigUrl` as the
+      destination (D025) since `TELEGRAM`'s `pathConfig` has no `destinationUrl` field.
+- [x] Publishing a `TELEGRAM` version now requires a validated bot (`botUsername` set) —
+      closes the gap where a `TELEGRAM` link could be published pointing at a bot with no
+      known `@username`, which would have made the deep link impossible to build.
+- [x] Verified against the real Telegram API in manual testing: `getMe` and `sendMessage`
+      both returned genuine Telegram error responses for a deliberately fake token, proving
+      the network integration itself (not just the mocked test suite) is wired correctly.
+      `setWebhook` was not verified against a real reachable URL — see OPEN_QUESTIONS.md.
 
 ## Phase 5 — Conversion ingestion + attribution
 

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { Prisma, Click, TrackingLink, FunnelStepType } from "@prisma/client";
 import type { TrackingLinkVersionSnapshot } from "@/lib/tracking-link-publishing";
+import { createTelegramStartPayload } from "@/lib/telegram-payload";
 
 // Kept framework-independent (no next/headers, no Next.js Request/Response
 // types) so it's directly callable from integration tests, the same
@@ -180,13 +181,20 @@ export function extractDestinationUrl(pathConfig: unknown): string | null {
 }
 
 export type PathViewResult =
-  | { ok: true; render: "redirect_direct" | "aggregator" }
-  | { ok: false; reason: "unsupported_path_type" };
+  | { ok: true; render: "redirect_direct" }
+  | { ok: true; render: "aggregator" }
+  | { ok: true; render: "redirect_telegram"; deepLinkUrl: string }
+  | { ok: false; reason: "unsupported_path_type" | "telegram_bot_missing" };
+
+function buildTelegramDeepLink(botUsername: string, payloadToken: string): string {
+  return `https://t.me/${botUsername}?start=${payloadToken}`;
+}
 
 // The decision made at /path/[clickId]: DIRECT skips straight to /out with no
-// interim page; AGGREGATOR renders the owned page and logs the view; any
-// other path type (i.e. TELEGRAM, not implemented in the public route yet)
-// fails safely rather than attempting a redirect with no real destination.
+// interim page; AGGREGATOR renders the owned page and logs the view;
+// TELEGRAM mints a short-lived start payload for this click and redirects
+// into the bot; anything else fails safely rather than attempting a redirect
+// with no real destination.
 export async function handlePathView(
   db: Db,
   clickId: string,
@@ -198,6 +206,25 @@ export async function handlePathView(
   if (snapshot.pathType === "AGGREGATOR") {
     await writeFunnelEvent(db, clickId, "AGGREGATOR_VIEWED");
     return { ok: true, render: "aggregator" };
+  }
+  if (snapshot.pathType === "TELEGRAM") {
+    // Publish-time validation guarantees telegramBot is set with a username
+    // whenever pathType is TELEGRAM, but defend against a corrupted/stale
+    // snapshot rather than throwing.
+    if (!snapshot.telegramBot) {
+      await writeFunnelEvent(db, clickId, "ROUTE_FAILED", { reason: "telegram_bot_missing" });
+      return { ok: false, reason: "telegram_bot_missing" };
+    }
+    const { payloadToken } = await createTelegramStartPayload(db, clickId, snapshot.telegramBot.id);
+    await writeFunnelEvent(db, clickId, "TELEGRAM_REDIRECTED", {
+      telegramBotId: snapshot.telegramBot.id,
+      botUsername: snapshot.telegramBot.username,
+    });
+    return {
+      ok: true,
+      render: "redirect_telegram",
+      deepLinkUrl: buildTelegramDeepLink(snapshot.telegramBot.username, payloadToken),
+    };
   }
   await writeFunnelEvent(db, clickId, "ROUTE_FAILED", {
     reason: "unsupported_path_type",
@@ -233,7 +260,11 @@ export async function executeOutbound(
     if (previousUrl) return { ok: true, destinationUrl: previousUrl };
   }
 
-  if (snapshot.pathType !== "DIRECT" && snapshot.pathType !== "AGGREGATOR") {
+  if (
+    snapshot.pathType !== "DIRECT" &&
+    snapshot.pathType !== "AGGREGATOR" &&
+    snapshot.pathType !== "TELEGRAM"
+  ) {
     await writeFunnelEvent(db, clickId, "ROUTE_FAILED", {
       reason: "unsupported_path_type",
       pathType: snapshot.pathType,
@@ -245,7 +276,13 @@ export async function executeOutbound(
     await writeFunnelEvent(db, clickId, "AGGREGATOR_CONTINUE_CLICKED");
   }
 
-  const destinationUrl = extractDestinationUrl(snapshot.pathConfig);
+  // DIRECT/AGGREGATOR use the admin-configured destinationUrl (D019);
+  // TELEGRAM has no such field in its pathConfig, so its terminal handoff
+  // target is the campaign's Paybig destination instead.
+  const destinationUrl =
+    snapshot.pathType === "TELEGRAM"
+      ? extractDestinationUrl({ destinationUrl: snapshot.campaign.paybigUrl })
+      : extractDestinationUrl(snapshot.pathConfig);
   if (!destinationUrl) {
     await writeFunnelEvent(db, clickId, "ROUTE_FAILED", { reason: "invalid_destination" });
     return { ok: false, reason: "invalid_destination" };

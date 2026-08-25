@@ -15,14 +15,25 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
 - Authentication for the inbound conversion endpoint — shared secret header, IP allowlist,
   signed payload? Needs to be resolved before Phase 5's security tests can be written.
 
-## Telegram (blocks Phase 4's telegram path type)
-- Deep-link mechanics: are we using `t.me/<bot>?start=<payload>` and reading the payload
-  inside the bot to recover `clickId`? If so, is there a separate small bot process needed,
-  or does the bot only need to *receive* the start payload and forward it somewhere (e.g. to
-  Paybig or to our own attribution endpoint)?
-- Is there one Telegram bot per brand, or can a brand have multiple bots for different
-  campaigns/experiments? Schema currently supports many bots per brand.
-- Rate limits / Telegram API quirks that affect how fast we can process starts.
+## Telegram — implemented; what remains open
+- **Resolved**: deep-link mechanics are `t.me/<bot>?start=<payload>` → Telegram sends
+  `/start <payload>` to our webhook → we resolve the payload server-side and reply with a CTA
+  linking back to `/out/{clickId}`. No separate bot process — a single Next.js webhook route
+  handles it, matching "do not build a complex conversational bot."
+- **Resolved**: one brand can have multiple bots (schema already supported this); nothing
+  in this milestone changed or needed to change that.
+- **Still open**: rate limits / Telegram API quirks under real volume — untested beyond
+  manual single-request verification and the mocked-API test suite. If a brand's bot gets
+  meaningful traffic, revisit `sendMessage` error handling (currently: log nothing, fail the
+  send silently, keep the attribution event) for retry/backoff behavior.
+- **Still open**: `setWebhook` requires a real public HTTPS `APP_BASE_URL` — verified against
+  the real `getMe`/`sendMessage` endpoints in this milestone's testing (both returned genuine
+  Telegram error responses for a fake token), but `setWebhook` itself was never exercised
+  against a reachable URL, so the admin's "best-effort" webhook registration path is unverified
+  against the real endpoint. Confirm once this app has a real deployment URL.
+- **Still open**: no re-validation reminder/expiry — once `botUsername` is set, nothing
+  prompts an admin to re-check it stays correct (e.g. if the bot is deleted in Telegram's
+  BotFather). A stale `botUsername` would only surface as a broken deep link at click time.
 
 ## Age gate
 - Is 18+ confirmation just a click-through interstitial (no real verification), or does

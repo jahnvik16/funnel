@@ -73,9 +73,9 @@ and required "HTTP-only session" + "logout" for admin auth:
   need to be queried/joined directly (which version does this arm serve, what's its weight)
   once traffic-split execution is built — the same reasoning as D005's structural-FK-vs-JSON
   split. `Experiment.variantConfig` remains as free-form experiment-level metadata only.
-- `TelegramStartPayload` models the deep-link token that will let a Telegram bot start event
-  be traced back to a `Click` (see OPEN_QUESTIONS.md "Telegram"). It is schema-only in this
-  milestone — nothing writes to it until the telegram path executor exists (Phase 4).
+- `TelegramStartPayload` models the deep-link token that lets a Telegram bot start event be
+  traced back to a `Click`. Schema-only as of this entry — it became load-bearing once the
+  Telegram funnel path was actually built; see D023.
 - `Session` was not in the original core entity list, but "HTTP-only session" + "logout" as
   stated requirements imply something server-side that can be invalidated on demand — a
   signed-stateless-cookie approach can't truly revoke a session before its cookie expires.
@@ -228,4 +228,69 @@ alongside them — safe only because the table was empty; would need a real data
 this ever needs to change again after real events exist. `TELEGRAM_START` was dropped rather
 than kept unused — it can be reintroduced accurately once the Telegram path is actually
 implemented (see CLAUDE.md "do not add a 4th path type" reasoning, applied here to unused
-enum values as much as path types).
+enum values as much as path types). *(It has since been reintroduced as `TELEGRAM_STARTED`,
+alongside `TELEGRAM_REDIRECTED` — see D022 onward. The prediction above held: it came back
+once the Telegram path was actually built, with real semantics rather than a placeholder.)*
+
+## D022 — Telegram bot validation upgraded from format-only to a live `getMe` call
+**Date:** 2026-08-25
+D012 deliberately deferred live Telegram API validation as integration work out of scope for
+the admin-config milestone. This milestone *is* that integration work: the admin's
+**Validate** action now calls Telegram's `getMe` through `lib/telegram.ts`, and only a
+successful call sets `TelegramBot.botUsername`. Publishing a `TELEGRAM`-path
+`TrackingLinkVersion` is rejected unless the chosen bot has a non-null `botUsername` — so a
+bot that has never been (or is no longer, post token-rotation) successfully validated can
+never end up live in a published version. `lib/telegram.ts`'s API functions accept an
+injectable `fetch` implementation specifically so `lib/telegram.test.ts` can exercise
+success/failure/network-error paths against a mock instead of real Telegram credentials.
+
+## D023 — Telegram start payloads are opaque, unguessable, and carry no encoded data
+**Date:** 2026-08-25
+The milestone's payload spec is explicit: "do not put sensitive information into the
+Telegram payload" and "use a short opaque payload token that maps to server-side state."
+`TelegramStartPayload.payloadToken` is 16 random bytes (base64url), with no click/campaign/
+link id encoded into it anywhere — `resolveTelegramStartPayload` recovers `click_id`,
+`trackingLinkId`, `trackingLinkVersionId`, `campaignId`, and `experimentArmId` entirely by
+joining through the already-created `Click` row (and a reverse lookup on
+`ExperimentArm.trackingLinkVersionId` for the arm). A leaked payload token therefore reveals
+nothing on its own, and grants nothing once expired. Payloads expire 15 minutes after
+creation (`PAYLOAD_TTL_MS` in `lib/telegram-payload.ts`) — long enough to open Telegram and
+tap "Start", short enough that a stale/abandoned link can't be replayed indefinitely.
+Resolution is idempotent (a second resolution of an already-consumed-but-unexpired payload
+still succeeds, reporting `alreadyConsumed: true`) because Telegram may retry webhook
+delivery.
+
+## D024 — Webhook secret verification is "as far as practical", not an absolute requirement
+**Date:** 2026-08-25
+The brief says to verify webhook authenticity "as far as practical" rather than mandating a
+specific mechanism. `TelegramBot.webhookSecretCiphertext` is populated only when the admin's
+Validate action successfully calls `setWebhook` — which requires `APP_BASE_URL` to be a real,
+public HTTPS URL Telegram can reach, something no local/dev environment has. Rather than
+block all webhook processing until a secret exists (which would make the Telegram path
+untestable locally), `verifyWebhookSecret` is permissive when no secret is on file yet and
+strict once one is: real deployments get real verification the moment `setWebhook` succeeds;
+local development can still exercise the full flow via a direct POST to the webhook route
+(see `lib/telegram-webhook.test.ts` and the manual verification in this milestone's session).
+
+## D025 — TELEGRAM's `/out` destination is `campaign.paybigUrl`, extending D019's open question
+**Date:** 2026-08-25
+D019 flagged that `pathConfig.destinationUrl` (used by `direct`/`aggregator`) vs.
+`campaign.paybigUrl` as the real Paybig redirect target was an open call, to be reconciled
+once Paybig's contract is known. `TELEGRAM`'s `pathConfig` has no `destinationUrl` field at
+all (it only ever holds an optional `startParamTemplate`), so there was no ambiguity to
+preserve: `executeOutbound` uses `snapshot.campaign.paybigUrl` for `TELEGRAM` specifically.
+This doesn't resolve D019's open question for `direct`/`aggregator` — that ambiguity still
+stands — but it does mean two of the three path types (`aggregator`, and now the `telegram`
+precedent) lean toward `campaign.paybigUrl` as the more likely eventual answer.
+
+## D026 — The webhook handler doesn't hold a DB transaction open across the call to Telegram
+**Date:** 2026-08-25
+`handleTelegramWebhook` accepts a `Prisma.TransactionClient`-shaped `db` (so it composes with
+the rest of the codebase's transaction-friendly typing) but is deliberately *not* wrapped in
+an explicit `prisma.$transaction(...)` by its caller. Resolving the payload and writing
+`TELEGRAM_STARTED` happen as ordinary statements, then the reply is sent via a real network
+call to Telegram's `sendMessage` API. Holding a Postgres transaction open for the duration of
+that network round-trip (with no upper bound if Telegram is slow) is worse than the small,
+idempotency-guarded risk of a duplicate `TELEGRAM_STARTED` write under concurrent webhook
+retries. A failed `sendMessage` is treated as best-effort and does not fail the webhook —
+the attribution event is already durable by that point regardless.

@@ -78,6 +78,14 @@ async function makeTrackingLink(brandId: string, domainId: string) {
   return link;
 }
 
+async function makeTelegramBot(brandId: string, botUsername: string | null) {
+  const bot = await prisma.telegramBot.create({
+    data: { brandId, name: unique("Bot"), botTokenCiphertext: "test.ciphertext.value", botUsername },
+  });
+  cleanup.push(() => prisma.telegramBot.delete({ where: { id: bot.id } }));
+  return bot;
+}
+
 async function setupBasicFixture() {
   const admin = await makeAdmin();
   const brand = await makeBrand();
@@ -184,6 +192,58 @@ test("validation rejects a Telegram path type with no active bot", async () => {
 
   assert.equal(result.valid, false);
   assert.ok(result.issues.some((i) => i.field === "telegramBotId"));
+});
+
+test("validation rejects a Telegram bot that hasn't been validated (no username on file)", async () => {
+  const { brand, campaign, link } = await setupBasicFixture();
+  const bot = await makeTelegramBot(brand.id, null);
+
+  const result = await validateTrackingLinkConfig(prisma, {
+    trackingLinkId: link.id,
+    campaignId: campaign.id,
+    socialAccountId: null,
+    pathType: PathType.TELEGRAM,
+    telegramBotId: bot.id,
+    ageGateEnabled: false,
+    experimentId: null,
+    experimentArmId: null,
+  });
+
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.issues.some((i) => i.field === "telegramBotId" && i.message.includes("not been validated")),
+  );
+});
+
+test("publish succeeds for a TELEGRAM path once the bot is validated, and the snapshot carries its username", async () => {
+  const { admin, brand, campaign, link } = await setupBasicFixture();
+  const bot = await makeTelegramBot(brand.id, "acme_offers_bot");
+
+  const result = await prisma.$transaction((tx) =>
+    publishTrackingLinkVersion(
+      tx,
+      {
+        trackingLinkId: link.id,
+        campaignId: campaign.id,
+        socialAccountId: null,
+        pathType: PathType.TELEGRAM,
+        telegramBotId: bot.id,
+        ageGateEnabled: false,
+        experimentId: null,
+        experimentArmId: null,
+      },
+      admin.id,
+    ),
+  );
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  cleanup.push(() => prisma.trackingLinkVersion.delete({ where: { id: result.versionId } }));
+  cleanup.push(() => prisma.trackingLink.update({ where: { id: link.id }, data: { currentVersionId: null } }));
+
+  const version = await prisma.trackingLinkVersion.findUniqueOrThrow({ where: { id: result.versionId } });
+  const snapshot = version.snapshot as { telegramBot: { id: string; name: string; username: string } | null };
+  assert.deepEqual(snapshot.telegramBot, { id: bot.id, name: bot.name, username: "acme_offers_bot" });
 });
 
 test("validation rejects a social account whose brand doesn't match the tracking link", async () => {

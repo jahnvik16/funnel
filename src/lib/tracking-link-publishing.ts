@@ -28,7 +28,7 @@ export type TrackingLinkVersionSnapshot = {
   socialAccount: { id: string; handle: string } | null;
   pathType: PathType;
   pathConfig: Prisma.JsonValue;
-  telegramBot: { id: string; name: string } | null;
+  telegramBot: { id: string; name: string; username: string } | null;
   ageGateEnabled: boolean;
   experiment: { id: string; name: string } | null;
   experimentArm: { id: string; name: string } | null;
@@ -164,6 +164,12 @@ async function loadAndValidate(
             message: "Telegram bot belongs to a different brand than this tracking link.",
           });
         }
+        if (!telegramBot.botUsername) {
+          issues.push({
+            field: "telegramBotId",
+            message: "Telegram bot has not been validated yet (no username on file). Validate it first.",
+          });
+        }
       }
     }
   }
@@ -234,7 +240,11 @@ function buildSnapshot(
       : null,
     pathType: input.pathType,
     pathConfig: pathConfig as Prisma.JsonValue,
-    telegramBot: entities.telegramBot ? { id: entities.telegramBot.id, name: entities.telegramBot.name } : null,
+    // botUsername is guaranteed non-null here — publishing a TELEGRAM version
+    // with an unvalidated bot is rejected above.
+    telegramBot: entities.telegramBot
+      ? { id: entities.telegramBot.id, name: entities.telegramBot.name, username: entities.telegramBot.botUsername! }
+      : null,
     ageGateEnabled: input.ageGateEnabled,
     experiment: entities.experimentArm
       ? { id: entities.experimentArm.experiment.id, name: entities.experimentArm.experiment.name }

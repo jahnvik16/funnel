@@ -157,15 +157,21 @@ Telegram credentials are secrets and are encrypted at rest (see ARCHITECTURE.md 
 | id | String | PK |
 | brandId | String | FK → Brand |
 | name | String | internal label |
-| botUsername | String? | not secret; null until the real Telegram integration derives it via `getMe` |
+| botUsername | String? | not secret; null until the admin's **Validate** action calls Telegram's `getMe` and succeeds |
 | botTokenCiphertext | String | AES-256-GCM ciphertext; decrypted only server-side at point of use |
-| welcomeMessage | String? | shown by the bot after `/start` (Phase 4) |
-| ctaLabel | String? | button label used by the bot (Phase 4) |
+| webhookSecretCiphertext | String? | AES-256-GCM ciphertext of our own shared secret, given to Telegram via `setWebhook`; null until a validate call registers it successfully |
+| welcomeMessage | String? | sent by `sendMessage` when the bot receives `/start` |
+| ctaLabel | String? | inline keyboard button label sent alongside the welcome message |
 | status | Status | |
 | createdAt / updatedAt | DateTime | |
 
-Bot tokens are validated for *format* only at admin-entry time (see DECISIONS.md D012) — no
-live call to Telegram's API is made in this milestone.
+Bot tokens are format-checked at admin-entry time (see DECISIONS.md D012) and then really
+validated via a live `getMe` call from the admin's **Validate** action (D022), which is also
+what populates `botUsername` and (best-effort) registers the webhook. Rotating the token
+(entering a new one on the edit form) clears both `botUsername` and
+`webhookSecretCiphertext` — the old validation no longer applies to a different token.
+Publishing a `TrackingLinkVersion` with `pathType = TELEGRAM` is rejected unless the chosen
+bot has a non-null `botUsername`.
 
 ### ApiConnection
 Generic external API credential holder (Paybig today, others later) without hardcoding a
@@ -288,15 +294,21 @@ resolved version at click time.
 
 ### FunnelEvent
 Step-by-step record of a click's progression through the funnel. Written by
-`src/lib/public-routing.ts` — see ARCHITECTURE.md §4 for exactly where each step fires.
+`src/lib/public-routing.ts` and `src/lib/telegram-webhook.ts` — see ARCHITECTURE.md §4/§4a for
+exactly where each step fires.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
 | clickId | String | FK → Click |
-| stepType | FunnelStepType | `ROUTE_RESOLVED \| AGE_GATE_SHOWN \| AGE_GATE_ACCEPTED \| AGE_GATE_DECLINED \| AGGREGATOR_VIEWED \| AGGREGATOR_CONTINUE_CLICKED \| OUTBOUND_PAYBIG_REDIRECTED \| ROUTE_FAILED` |
-| metadata | Json? | e.g. `{pathType}` on `ROUTE_RESOLVED`, `{destinationUrl}` on `OUTBOUND_PAYBIG_REDIRECTED`, `{reason, pathType?}` on `ROUTE_FAILED` |
+| stepType | FunnelStepType | `ROUTE_RESOLVED \| AGE_GATE_SHOWN \| AGE_GATE_ACCEPTED \| AGE_GATE_DECLINED \| AGGREGATOR_VIEWED \| AGGREGATOR_CONTINUE_CLICKED \| TELEGRAM_REDIRECTED \| TELEGRAM_STARTED \| OUTBOUND_PAYBIG_REDIRECTED \| ROUTE_FAILED` |
+| metadata | Json? | e.g. `{pathType}` on `ROUTE_RESOLVED`, `{telegramBotId, botUsername}` on `TELEGRAM_REDIRECTED`, `{telegramBotId}` on `TELEGRAM_STARTED`, `{destinationUrl}` on `OUTBOUND_PAYBIG_REDIRECTED`, `{reason, pathType?}` on `ROUTE_FAILED` |
 | occurredAt | DateTime | |
+
+`TELEGRAM_STARTED` has the same once-per-click idempotency guard as `OUTBOUND_PAYBIG_
+REDIRECTED` (checked via `hasFunnelEvent` rather than by inspecting prior metadata) — Telegram
+may redeliver a webhook update, and the payload's own `consumedAt` can't be relied on alone
+since resolving it is itself idempotent.
 
 `OUTBOUND_PAYBIG_REDIRECTED` is written at most once per click — `executeOutbound` checks for
 an existing one first and replays its `destinationUrl` rather than duplicating (a redirect to
@@ -306,17 +318,19 @@ and `AGE_GATE_DECLINED` have the same guard. `ROUTE_RESOLVED`, `AGE_GATE_SHOWN`,
 
 ### TelegramStartPayload
 An opaque token embedded in a `t.me/<bot>?start=<token>` deep link so a Telegram bot start
-event can eventually be traced back to the `Click` that produced it. Written when the
-telegram path executor runs (Phase 4) — schema only for now, nothing writes to this table yet.
+event can be traced back to the `Click` that produced it. Written by `/path/[clickId]` when a
+version's `pathType` is `TELEGRAM`; resolved by the webhook (`app/api/telegram/webhook/
+[botId]`) when the bot receives `/start <token>`.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
 | clickId | String | FK → Click |
 | telegramBotId | String | FK → TelegramBot |
-| payloadToken | String | unique, the opaque value placed in the deep link |
+| payloadToken | String | unique, opaque (16 random bytes, base64url) — encodes nothing itself, see DECISIONS.md D023 |
 | createdAt | DateTime | |
-| consumedAt | DateTime? | set once the bot's `/start` handler processes it |
+| expiresAt | DateTime | 15 minutes after `createdAt` — see D023 |
+| consumedAt | DateTime? | set the first time the webhook resolves it; resolution is idempotent past that point |
 
 ### Conversion
 **Paybig conversion data.** Paybig is authoritative for whether/when a signup happened;

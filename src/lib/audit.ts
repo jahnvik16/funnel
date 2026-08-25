@@ -7,7 +7,8 @@ export type AuditAction =
   | "UNARCHIVE"
   | "PUBLISH"
   | "PAUSE"
-  | "ACTIVATE";
+  | "ACTIVATE"
+  | "VALIDATE";
 
 type WriteAuditLogParams = {
   actorId: string;

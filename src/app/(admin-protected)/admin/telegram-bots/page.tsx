@@ -27,6 +27,7 @@ export default async function TelegramBotsPage() {
           <tr>
             <th className={ui.th}>Name</th>
             <th className={ui.th}>Brand</th>
+            <th className={ui.th}>Username</th>
             <th className={ui.th}>Token</th>
             <th className={ui.th}>Status</th>
             <th className={ui.th}></th>
@@ -41,6 +42,9 @@ export default async function TelegramBotsPage() {
                 </Link>
               </td>
               <td className={ui.td}>{bot.brand.name}</td>
+              <td className={ui.td}>
+                {bot.botUsername ? `@${bot.botUsername}` : <span className={ui.muted}>Not validated</span>}
+              </td>
               <td className={ui.td}>
                 <span className={`${ui.badge} ${ui.badgeActive}`}>Configured</span>
               </td>
@@ -58,7 +62,7 @@ export default async function TelegramBotsPage() {
           ))}
           {bots.length === 0 ? (
             <tr>
-              <td className={ui.td} colSpan={5}>
+              <td className={ui.td} colSpan={6}>
                 <span className={ui.muted}>No Telegram bots yet.</span>
               </td>
             </tr>

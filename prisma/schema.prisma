@@ -42,6 +42,8 @@ enum FunnelStepType {
   AGE_GATE_DECLINED
   AGGREGATOR_VIEWED
   AGGREGATOR_CONTINUE_CLICKED
+  TELEGRAM_REDIRECTED
+  TELEGRAM_STARTED
   OUTBOUND_PAYBIG_REDIRECTED
   ROUTE_FAILED
 }
@@ -221,11 +223,15 @@ model TelegramBot {
   brandId            String
   brand              Brand    @relation(fields: [brandId], references: [id])
   name               String
-  // Populated later by the real Telegram integration (getMe); admin-entered
-  // token format is validated at the application layer in this milestone,
-  // no live Telegram API call is made.
+  // Set by the "Validate" admin action's live getMe call — null means the
+  // token has never been successfully validated against Telegram's API.
   botUsername        String?
   botTokenCiphertext String
+  // Our own shared secret, given to Telegram via setWebhook so inbound
+  // webhook calls can be checked against the X-Telegram-Bot-Api-Secret-Token
+  // header. Encrypted at rest like the bot token; null until a validate call
+  // successfully registers a webhook. Never logged or exposed to the client.
+  webhookSecretCiphertext String?
   welcomeMessage     String?
   ctaLabel           String?
   status             Status   @default(ACTIVE)
@@ -240,7 +246,9 @@ model TelegramBot {
 
 // An opaque token embedded in a `t.me/<bot>?start=<token>` deep link so a
 // Telegram bot start event can be traced back to the Click that produced it.
-// Written when the telegram path executor runs (Phase 4); schema only for now.
+// Short-lived by design (expiresAt) — resolved almost immediately after
+// creation, so unlike TrackingLinkVersion/Click it does not need its own
+// frozen denormalized copies; resolution joins through Click at lookup time.
 model TelegramStartPayload {
   id            String    @id @default(cuid())
   clickId       String
@@ -249,6 +257,7 @@ model TelegramStartPayload {
   telegramBot   TelegramBot @relation(fields: [telegramBotId], references: [id])
   payloadToken  String    @unique
   createdAt     DateTime  @default(now())
+  expiresAt     DateTime
   consumedAt    DateTime?
 
   @@index([clickId])

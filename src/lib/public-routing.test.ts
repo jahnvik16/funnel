@@ -82,12 +82,33 @@ async function makeTrackingLink(brandId: string, domainId: string, token = uniqu
   return link;
 }
 
+async function makeTelegramBot(brandId: string, overrides: { botUsername?: string | null } = {}) {
+  const bot = await prisma.telegramBot.create({
+    data: {
+      brandId,
+      name: unique("Bot"),
+      botTokenCiphertext: "test.ciphertext.value",
+      botUsername: overrides.botUsername === undefined ? unique("bot") : overrides.botUsername,
+    },
+  });
+  cleanup.push(() => prisma.telegramBot.delete({ where: { id: bot.id } }));
+  return bot;
+}
+
+type PublishOverrides = {
+  pathType?: PathType;
+  destinationUrl?: string;
+  ageGateEnabled?: boolean;
+  telegramBotId?: string | null;
+};
+
 async function publishVersion(
   adminId: string,
   linkId: string,
   campaignId: string,
-  overrides: { pathType?: PathType; destinationUrl?: string; ageGateEnabled?: boolean } = {},
+  overrides: PublishOverrides = {},
 ) {
+  const isTelegram = overrides.pathType === PathType.TELEGRAM;
   const result = await prisma.$transaction((tx) =>
     publishTrackingLinkVersion(
       tx,
@@ -96,7 +117,8 @@ async function publishVersion(
         campaignId,
         socialAccountId: null,
         pathType: overrides.pathType ?? PathType.DIRECT,
-        destinationUrl: overrides.destinationUrl ?? "https://paybig.example/checkout",
+        destinationUrl: isTelegram ? undefined : (overrides.destinationUrl ?? "https://paybig.example/checkout"),
+        telegramBotId: isTelegram ? overrides.telegramBotId : undefined,
         ageGateEnabled: overrides.ageGateEnabled ?? false,
         experimentId: null,
         experimentArmId: null,
@@ -111,9 +133,7 @@ async function publishVersion(
   return result.versionId;
 }
 
-async function setupPublishedFixture(
-  overrides: { pathType?: PathType; destinationUrl?: string; ageGateEnabled?: boolean } = {},
-) {
+async function setupPublishedFixture(overrides: PublishOverrides = {}) {
   const admin = await makeAdmin();
   const brand = await makeBrand();
   const platform = await makePlatform();
@@ -383,7 +403,7 @@ test("age gate decline is logged distinctly from acceptance", async () => {
 
 // --- Failure paths after a Click exists --------------------------------------
 
-test("handlePathView fails safely for an unsupported (Telegram) path type and logs route_failed", async () => {
+test("handlePathView fails safely against a corrupted TELEGRAM snapshot with no telegramBot", async () => {
   const { domain, link } = await setupPublishedFixture();
   const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
   if (!resolved.ok) return assert.fail();
@@ -395,10 +415,44 @@ test("handlePathView fails safely for an unsupported (Telegram) path type and lo
   });
   cleanup.push(() => deleteClick(click.id));
 
-  const telegramSnapshot = { ...resolved.snapshot, pathType: PathType.TELEGRAM };
-  const result = await handlePathView(prisma, click.id, telegramSnapshot);
-  assert.deepEqual(result, { ok: false, reason: "unsupported_path_type" });
+  const corruptedSnapshot = { ...resolved.snapshot, pathType: PathType.TELEGRAM, telegramBot: null };
+  const result = await handlePathView(prisma, click.id, corruptedSnapshot);
+  assert.deepEqual(result, { ok: false, reason: "telegram_bot_missing" });
   assert.deepEqual(await eventSequence(click.id), ["ROUTE_FAILED"]);
+});
+
+test("handlePathView mints a start payload and returns a t.me deep link for TELEGRAM", async () => {
+  const { brand, domain, link } = await setupPublishedFixture();
+  const bot = await makeTelegramBot(brand.id, { botUsername: "acme_offers_bot" });
+  const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
+  if (!resolved.ok) return assert.fail();
+
+  const click = await recordClick(prisma, resolved.link, resolved.versionId, resolved.snapshot, {
+    ip: null,
+    userAgent: null,
+    referrer: null,
+    searchParams: new URLSearchParams(),
+  });
+  cleanup.push(() => deleteClick(click.id));
+
+  const telegramSnapshot = {
+    ...resolved.snapshot,
+    pathType: PathType.TELEGRAM,
+    telegramBot: { id: bot.id, name: bot.name, username: bot.botUsername! },
+  };
+  const result = await handlePathView(prisma, click.id, telegramSnapshot);
+  assert.equal(result.ok, true);
+  if (!result.ok || result.render !== "redirect_telegram") return assert.fail();
+  assert.match(result.deepLinkUrl, /^https:\/\/t\.me\/acme_offers_bot\?start=/);
+
+  assert.deepEqual(await eventSequence(click.id), ["TELEGRAM_REDIRECTED"]);
+
+  const payloadToken = new URL(result.deepLinkUrl).searchParams.get("start")!;
+  const payload = await prisma.telegramStartPayload.findUnique({ where: { payloadToken } });
+  assert.ok(payload);
+  assert.equal(payload!.clickId, click.id);
+  assert.equal(payload!.telegramBotId, bot.id);
+  cleanup.push(() => prisma.telegramStartPayload.delete({ where: { id: payload!.id } }));
 });
 
 test("executeOutbound fails safely when the snapshot has no valid destination URL", async () => {
@@ -455,7 +509,31 @@ test("executeOutbound is idempotent: a repeated call replays the same destinatio
   );
 });
 
-test("executeOutbound rejects an unsupported path type reached directly", async () => {
+test("executeOutbound uses the campaign's Paybig URL for TELEGRAM (no pathConfig.destinationUrl field exists for it)", async () => {
+  const { brand, domain, link } = await setupPublishedFixture();
+  const bot = await makeTelegramBot(brand.id, { botUsername: "acme_offers_bot" });
+  const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
+  if (!resolved.ok) return assert.fail();
+  const click = await recordClick(prisma, resolved.link, resolved.versionId, resolved.snapshot, {
+    ip: null,
+    userAgent: null,
+    referrer: null,
+    searchParams: new URLSearchParams(),
+  });
+  cleanup.push(() => deleteClick(click.id));
+
+  const telegramSnapshot = {
+    ...resolved.snapshot,
+    pathType: PathType.TELEGRAM,
+    pathConfig: { startParamTemplate: null },
+    telegramBot: { id: bot.id, name: bot.name, username: bot.botUsername! },
+  };
+  const result = await executeOutbound(prisma, click.id, telegramSnapshot);
+  assert.deepEqual(result, { ok: true, destinationUrl: resolved.snapshot.campaign.paybigUrl });
+  assert.deepEqual(await eventSequence(click.id), ["OUTBOUND_PAYBIG_REDIRECTED"]);
+});
+
+test("executeOutbound fails safely for a truly unrecognized path type (defensive fallback)", async () => {
   const { domain, link } = await setupPublishedFixture();
   const resolved = await resolveTrackingLinkVersion(prisma, domain.hostname, link.token);
   if (!resolved.ok) return assert.fail();
@@ -467,8 +545,10 @@ test("executeOutbound rejects an unsupported path type reached directly", async 
   });
   cleanup.push(() => deleteClick(click.id));
 
-  const telegramSnapshot = { ...resolved.snapshot, pathType: PathType.TELEGRAM };
-  const result = await executeOutbound(prisma, click.id, telegramSnapshot);
+  // PathType only ever has 3 real values — this forces the defensive branch
+  // that only matters if the schema/type ever drifts out of sync.
+  const bogusSnapshot = { ...resolved.snapshot, pathType: "CARRIER_PIGEON" as PathType };
+  const result = await executeOutbound(prisma, click.id, bogusSnapshot);
   assert.deepEqual(result, { ok: false, reason: "unsupported_path_type" });
   assert.deepEqual(await eventSequence(click.id), ["ROUTE_FAILED"]);
 });

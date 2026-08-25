@@ -2,8 +2,10 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { StatusBadge } from "../../_components/StatusBadge";
 import { TELEGRAM_BOT_SAFE_SELECT } from "../selects";
 import { EditTelegramBotForm } from "./EditTelegramBotForm";
+import { ValidateBotForm } from "./ValidateBotForm";
 
 export default async function EditTelegramBotPage({
   params,
@@ -24,8 +26,23 @@ export default async function EditTelegramBotPage({
           ← Telegram bots
         </Link>
       </div>
-      <h1 className={ui.pageTitle}>{bot.name}</h1>
-      <EditTelegramBotForm bot={bot} brands={brands} />
+      <div className="flex items-center gap-3">
+        <h1 className={ui.pageTitle}>{bot.name}</h1>
+        <StatusBadge status={bot.status} />
+      </div>
+      <p className={ui.muted}>
+        {bot.botUsername ? `@${bot.botUsername}` : "Not yet validated — no username on file."}
+      </p>
+
+      <section className="flex flex-col gap-4">
+        <h2 className={ui.sectionTitle}>Validation</h2>
+        <ValidateBotForm botId={bot.id} />
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <h2 className={ui.sectionTitle}>Settings</h2>
+        <EditTelegramBotForm bot={bot} brands={brands} />
+      </section>
     </div>
   );
 }
