@@ -14,6 +14,8 @@ const NAV_LINKS = [
   { href: "/admin/telegram-bots", label: "Telegram bots" },
   { href: "/admin/api-connections", label: "API connections" },
   { href: "/admin/experiments", label: "Experiments" },
+  { href: "/admin/conversions", label: "Conversions" },
+  { href: "/admin/reports", label: "Reports" },
 ];
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {

@@ -122,19 +122,36 @@ sequenced here. Delivered together:
       the network integration itself (not just the mocked test suite) is wired correctly.
       `setWebhook` was not verified against a real reachable URL — see OPEN_QUESTIONS.md.
 
-## Phase 5 — Conversion ingestion + attribution
+## Phase 5 — Conversion ingestion + attribution (done, as a CSV import — see below)
 
-- Inbound endpoint for Paybig conversion data (webhook and/or scheduled pull — depends on
-  what Paybig actually offers; see OPEN_QUESTIONS.md).
-- Attribution join: `Conversion` → `Click` (via whatever key Paybig round-trips) → `Campaign`
-  / `Brand` / `TrackingLinkVersion`.
-- Idempotent ingestion keyed on `paybigConversionId`.
+- [x] `lib/paybig-import.ts` — CSV parsing (hand-rolled, RFC4180-ish), row validation, dedup
+      (`conversion_id` preferred, documented composite-key fallback — DECISIONS.md D027),
+      `campaign_slug` matching against `Campaign.slug` across all brands (ambiguous/not-found
+      both treated as unmatched, never guessed — D028), and a per-import summary (created/
+      duplicates/invalid/unmatched/matched counts).
+- [x] Admin UI: `/admin/conversions` — CSV upload form, inline import summary (invalid rows
+      with reasons, unmatched `campaign_slug` values with reasons), recent-conversions table.
+      One `AuditLog` row per import batch (`IMPORT` action), not per `Conversion` row.
+- [x] Idempotent ingestion keyed on `paybigConversionId` (already `@unique` from Phase 0) —
+      repeated imports of the same file create zero new rows the second time.
+- Resolved: V1's actual answer to "what does Paybig's conversion data look like" is a
+  **campaign-level** CSV export (`campaign_slug`, no click/sub-id). The `Conversion` → `Click`
+  join anticipated in this phase's original brief never happens in V1 — `clickId` stays null
+  for every CSV-imported row. See OPEN_QUESTIONS.md (updated) and DECISIONS.md D029.
 
-## Phase 6 — Reporting
+## Phase 6 — Reporting (done)
 
-- Clicks by brand/platform/campaign/tracking link, with date range filters.
-- Funnel step drop-off (gate shown → passed → redirected → converted).
-- Paid-conversion attribution report answering the core business question directly.
+- [x] `lib/attribution-report.ts` + `/admin/reports` — filters for date range, brand, platform,
+      campaign, path, social account, experiment, and experiment arm.
+- [x] Funnel metrics (clicks, age gate accepts, aggregator views, Telegram starts, outbound
+      Paybig redirects, outbound redirect rate) computed from `Click`/`FunnelEvent` at full
+      filter granularity.
+- [x] Signup attribution (campaign-level): signups, signup rate per click, signup rate per
+      outbound redirect, unmatched conversions, default/catch-all conversions — computed only
+      at the campaign-level-compatible filters (date/brand/platform/campaign). Selecting a
+      path/social-account/experiment/experiment-arm filter visibly flags the rate metrics as
+      unavailable rather than silently showing a number the data can't support — see
+      DECISIONS.md D029, the milestone's "critical attribution rule."
 
 ## Phase 7 — Experiment execution (if still needed)
 

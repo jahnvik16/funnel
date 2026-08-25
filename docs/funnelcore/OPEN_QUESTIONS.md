@@ -3,17 +3,32 @@
 Unresolved items that need a real answer (from the business/Paybig/Telegram side, or a
 deliberate product decision) before or during the phase noted. Not blocking Phase 0.
 
-## Paybig integration (blocks Phase 2 & Phase 5)
-- What does Paybig's actual conversion notification look like — webhook push, polling API,
-  or a redirect-time postback? This determines the shape of `Conversion.rawPayload` and how
-  `Conversion` attributes back to `Click`.
-- What join key does Paybig round-trip to us? Options: we pass our `clickId` as a sub-id/
-  click-id param through the redirect chain and Paybig echoes it back on conversion; or
-  Paybig only gives us its own campaign/lane id and we attribute at the `Campaign` level
-  (coarser — can't tie a conversion to one specific click, only to a campaign+time window).
-- Does Paybig support a test/sandbox mode for verifying the integration without real spend?
-- Authentication for the inbound conversion endpoint — shared secret header, IP allowlist,
-  signed payload? Needs to be resolved before Phase 5's security tests can be written.
+## Paybig integration — V1 shipped as CSV import; what remains open
+- **Resolved for V1**: the conversion notification is an admin-uploaded CSV
+  (`campaign_slug`, `conversion_time`, `amount`, `currency`, optionally `conversion_id`) — not
+  a webhook, polling API, or redirect-time postback. `lib/paybig-import.ts` +
+  `/admin/conversions`; see DECISIONS.md D027.
+- **Resolved for V1**: the join key Paybig round-trips is `campaign_slug` only — no click-id/
+  sub-id. Attribution is therefore at the `Campaign` level, the coarser of the two options this
+  file previously posed: a conversion can be tied to a campaign+time window, never to one
+  specific click. `Conversion.clickId` stays null for every CSV-imported row in V1. The
+  attribution dashboard (`lib/attribution-report.ts`, DECISIONS.md D029) makes this explicit
+  rather than papering over it — signup metrics are only ever computed at the campaign level,
+  and the UI visibly flags when a selected filter (path/social account/experiment/experiment
+  arm) can't be honored by signup data.
+- **Still open**: if Paybig later offers a real inbound mechanism (webhook/API) instead of a
+  manual CSV export, or starts round-tripping a click-id/sub-id, revisit both the ingestion
+  mechanism (currently admin-triggered upload, authenticated via the existing admin session —
+  no separate inbound-endpoint auth was needed) and whether click-level signup attribution
+  becomes possible. That would let `signupRatePerClick`/`signupRatePerOutboundRedirect` be
+  computed precisely at any filter granularity instead of being suppressed under D029's
+  compatibility rule.
+- **Still open**: does Paybig support a test/sandbox export for verifying the CSV format
+  without real spend? V1's tests use synthetic CSVs built from the milestone's documented
+  minimum-field spec, not a real Paybig export sample.
+- **Still open**: CSV delivery cadence/volume is unknown — `lib/paybig-import.ts` processes a
+  file row-by-row with no batching/streaming, fine for the volumes tested so far but untested
+  against a very large export.
 
 ## Telegram — implemented; what remains open
 - **Resolved**: deep-link mechanics are `t.me/<bot>?start=<payload>` → Telegram sends
@@ -82,6 +97,10 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   constraint. No DB-level enforcement exists — a direct SQL write could still violate this.
 
 ## Reporting
-- What's the expected query volume/retention window for `Click`/`FunnelEvent`? Affects
-  whether V1 needs any pre-aggregation or if direct Postgres queries over raw rows are
-  sufficient for the reporting phase.
+- `/admin/reports` (Phase 6) runs direct Postgres `count()` queries over raw `Click`/
+  `FunnelEvent`/`Conversion` rows per request, no pre-aggregation — untested at real traffic
+  volume. What's the expected query volume/retention window? Affects whether V1 eventually
+  needs pre-aggregated rollups instead of counting raw rows on every dashboard load.
+- The dashboard's date-range filter has no default bound (an all-time query if left blank) —
+  fine at current data volumes, worth revisiting once there's enough `Click`/`Conversion`
+  history for that to matter.

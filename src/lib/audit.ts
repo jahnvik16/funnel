@@ -8,7 +8,8 @@ export type AuditAction =
   | "PUBLISH"
   | "PAUSE"
   | "ACTIVATE"
-  | "VALIDATE";
+  | "VALIDATE"
+  | "IMPORT";
 
 type WriteAuditLogParams = {
   actorId: string;

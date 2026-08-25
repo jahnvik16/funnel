@@ -294,3 +294,59 @@ that network round-trip (with no upper bound if Telegram is slow) is worse than 
 idempotency-guarded risk of a duplicate `TELEGRAM_STARTED` write under concurrent webhook
 retries. A failed `sendMessage` is treated as best-effort and does not fail the webhook —
 the attribution event is already durable by that point regardless.
+
+## D027 — Paybig conversions arrive as an admin-uploaded CSV; dedup prefers `conversion_id`, falls back to a documented composite key
+**Date:** 2026-08-25
+The milestone's V1 input is explicitly "Paybig CSV," not a live webhook or polling
+integration — `lib/paybig-import.ts` implements a hand-rolled RFC4180-ish parser (quoted
+fields, embedded commas/newlines, `""` escaping) rather than adding a dependency, since the
+shape is small and fully test-covered. No new schema was needed: `Conversion.paybigConversionId`
+was already `@unique` and `clickId`/`campaignId`/`brandId` were already nullable, from Phase 0.
+
+Deduplication prefers the row's real `conversion_id` as the storage key, matching that unique
+constraint directly. When a row has no `conversion_id`, `computeStorageKey` falls back to
+`composite:{campaign_slug}|{conversion_time}|{amount}|{currency}`. **Documented limitation**:
+two genuinely distinct conversions that share all four of those values are indistinguishable
+under the fallback and collide — the second is dropped as a duplicate rather than
+double-counted. This is a deliberate bias (never inflate signups on a repeated import) at the
+cost of occasionally under-counting an edge case that real `conversion_id`s avoid entirely; see
+OPEN_QUESTIONS.md. The import itself is admin-triggered (upload → parse → summary), not an
+inbound endpoint, so the "authentication for the inbound conversion endpoint" open question
+does not apply to this milestone — it already goes through `requireAdmin()` like every other
+admin action.
+
+## D028 — An unmatched or ambiguous `campaign_slug` still creates a Conversion row; FunnelCore never guesses the campaign
+**Date:** 2026-08-25
+`Campaign.slug` is unique per brand (`@@unique([brandId, slug])`), not globally, so a bare
+`campaign_slug` from a CSV row can legitimately match campaigns in more than one brand.
+`importPaybigCsv` treats that ambiguous case the same as "not found" — it never guesses which
+brand's campaign was meant. Per CLAUDE.md rule 8 ("Paybig is authoritative for signups"),
+neither case drops the row: a Conversion is still created with `campaignId`/`brandId` left
+null and the full raw row preserved in `rawPayload`, so a real reported signup is never lost
+just because our internal attribution couldn't resolve it — it shows up in the "unmatched
+conversions" report metric instead, with the reason (`not_found` vs `ambiguous`) visible in the
+import summary for diagnosis.
+
+## D029 — The attribution dashboard computes funnel metrics at full filter granularity, signup metrics only at the campaign-level ceiling
+**Date:** 2026-08-25
+This directly implements the milestone's "do not claim precision the underlying data does not
+support" rule. `Click`/`FunnelEvent` carry real click-level attribution (brand, platform,
+social account, campaign, path type, experiment arm — all copied from the resolved
+`TrackingLinkVersion` snapshot), so clicks/age-gate-accepts/aggregator-views/telegram-starts/
+outbound-redirects in `lib/attribution-report.ts` are precise at whatever combination of
+filters is selected. `Conversion` rows from a Paybig CSV only ever carry `campaignId`/`brandId`
+— no path, social account, or experiment information exists to filter by.
+
+`isSignupAttributionCompatible` is false whenever a path, social-account, experiment, or
+experiment-arm filter is active. When false, the dashboard still shows a real signups count
+(computed against the campaign-level-compatible filters only: date/brand/platform/campaign,
+ignoring the incompatible ones) but forces `signupRatePerClick` and
+`signupRatePerOutboundRedirect` to `null` — computing those rates against a filtered click
+count from a different attribution granularity than the signup numerator would produce an
+actively wrong number, not merely an imprecise one, so they're suppressed rather than shown
+with a caveat. The admin UI renders a visible warning banner in this state rather than a silent
+`N/A`, so the distinction is obvious at a glance, not just present in a tooltip. "Signups" is
+also deliberately defined as *attributed* signups (`campaignId IS NOT NULL`) so it never
+double-counts a row already reported under the separate "unmatched conversions" metric — an
+inconsistency the manual browser verification for this milestone caught before the fix landed
+(the two counts summed to more than the true total).

@@ -350,6 +350,16 @@ FunnelCore's job is correct attribution, not correcting Paybig's numbers.
 | receivedAt | DateTime | when FunnelCore ingested it |
 | rawPayload | Json | full original payload, for replay/debugging |
 
+**Ingestion (V1):** admin-uploaded Paybig CSV (`lib/paybig-import.ts`), not a live
+webhook/polling integration — see DECISIONS.md D027. Dedup prefers `conversion_id` as
+`paybigConversionId` directly; when a row has no `conversion_id`, a composite key
+(`campaign_slug` + `conversion_time` + `amount` + `currency`) is used instead, with the
+documented collision limitation in D027. `campaign_slug` is matched against `Campaign.slug`
+across *all* brands — since that column is only unique per brand, a slug matching more than
+one brand's campaign is treated as unmatched/ambiguous rather than guessed (D028). An
+unmatched or ambiguous row still creates a `Conversion` with `clickId`/`campaignId`/`brandId`
+left null; the row is never dropped (CLAUDE.md rule 8).
+
 ## 3. Enums
 
 - `Status`: `ACTIVE`, `ARCHIVED` — generic lifecycle for config entities.
