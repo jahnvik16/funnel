@@ -117,6 +117,25 @@ test("parseCsv strips a leading UTF-8 BOM instead of fusing it onto the first he
   assert.equal(rows[0].conversion_id, "abc123");
 });
 
+// Found via QA with a deliberately-corrupted upload: Postgres text/jsonb
+// columns cannot store a NUL byte at all ("unsupported Unicode escape
+// sequence"). A NUL anywhere in the file — even inside a row that fails
+// validation and never reaches Conversion.create — still gets embedded in
+// the invalid-row detail persisted to the import's AuditLog entry, which
+// crashed the entire import with an unhandled 500 instead of reporting the
+// row as invalid. Stripping it at the tokenizer is what makes every
+// downstream write (Conversion.rawPayload, the audit log's summary) safe.
+test("parseCsv strips embedded NUL bytes instead of letting them reach a row value", () => {
+  const NUL = String.fromCharCode(0);
+  const { rows } = parseCsv(
+    `conversion_id,conversion_time,campaign_slug,amount,currency\n` +
+      `abc${NUL}123,2026-08-01T12:00:00Z,spring${NUL}push,19.99,USD\n`,
+  );
+  assert.equal(rows[0].conversion_id, "abc123");
+  assert.equal(rows[0].campaign_slug, "springpush");
+  assert.ok(!rows[0].conversion_id.includes(NUL));
+});
+
 // ---------------------------------------------------------------------------
 // validatePaybigRow
 // ---------------------------------------------------------------------------
@@ -354,4 +373,31 @@ test("importPaybigCsv treats a slug shared by two brands' campaigns as ambiguous
 
   const row = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
   assert.equal(row.campaignId, null);
+});
+
+// Regression for a real crash found via manual QA: a NUL byte in an "extra"
+// (ignored) column of an otherwise-valid row used to reach
+// Conversion.rawPayload verbatim, and Postgres's jsonb type rejects NUL
+// bytes outright — the whole import failed with an unhandled 500 instead of
+// importing the row. The row-level fields (conversion_id, campaign_slug,
+// amount, currency) are untouched by a NUL in a column the import doesn't
+// even read.
+test("importPaybigCsv does not crash on a NUL byte embedded in an extra column", async () => {
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const campaign = await makeCampaign(brand.id, platform.id);
+  const id = unique("conv-nul");
+  cleanup.push(() => deleteConversions([id]));
+
+  const NUL = String.fromCharCode(0);
+  const csv =
+    "conversion_id,conversion_time,campaign_slug,amount,currency,note\n" +
+    `${id},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD,corrupted${NUL}value\n`;
+
+  const summary = await importPaybigCsv(prisma, csv);
+
+  assert.equal(summary.created, 1);
+  assert.equal(summary.invalid.length, 0);
+  const row = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
+  assert.equal(row.campaignId, campaign.id);
 });

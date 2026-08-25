@@ -20,7 +20,16 @@ function tokenizeCsv(content: string): string[][] {
   // "﻿conversion_time"), so every row would report that column
   // "missing" without any obviously-wrong symptom to point at why.
   const withoutBom = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
-  const text = withoutBom.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Postgres text/jsonb columns cannot store a NUL byte at all (raises
+  // "unsupported Unicode escape sequence") — found via QA with a corrupted
+  // upload. A NUL anywhere in the file, even inside a row that fails
+  // validation and never reaches Conversion.create, still gets embedded in
+  // the invalid-row detail persisted to the import's AuditLog entry
+  // (writeAuditLog's `after: summary` — see conversions/actions.ts), which
+  // crashed the entire import with an unhandled 500. Stripped here so
+  // neither that write nor Conversion.rawPayload can ever contain one.
+  const withoutNulBytes = withoutBom.replace(new RegExp(String.fromCharCode(0), "g"), "");
+  const text = withoutNulBytes.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];

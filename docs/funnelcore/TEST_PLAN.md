@@ -184,7 +184,11 @@ publishing link's brand (replacing the old, now-removed `experiment.trackingLink
   assert exact timing equality (too flaky for a unit test), only that bcrypt's real cost is
   paid on both paths.
 - **Malformed input**: `paybig-import.test.ts` covers a UTF-8-BOM-prefixed CSV header resolving
-  correctly instead of every row reporting the first column missing (D038).
+  correctly instead of every row reporting the first column missing (D038), and — found via the
+  V1 QA pass, not written speculatively — a NUL byte anywhere in the file no longer crashes the
+  whole import with an unhandled 500 (a unit test on `parseCsv`, plus an integration test
+  proving `importPaybigCsv` imports a row cleanly even with a NUL in an ignored extra column;
+  see D042).
 - **Hung network calls**: `telegram.test.ts` proves `callTelegramApi` passes an `AbortSignal` to
   `fetch` and treats an abort like any other network failure, without waiting out a real
   timeout in the test itself (D040).

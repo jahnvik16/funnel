@@ -524,3 +524,29 @@ happened. Now caught and returned as "Another version was just published for thi
 retry," which succeeds immediately (the retry reads past the just-committed version). Proven
 under a real concurrent publish in `tracking-link-publishing.test.ts` — the underlying
 constraint fires exactly as expected; only the Server Action's response to it changed.
+
+---
+
+# V1 QA pass (this milestone)
+
+Full end-to-end QA against CLAUDE.md/PRODUCT_SPEC.md/ARCHITECTURE.md/TEST_PLAN.md, exercising
+the complete scenario and all 17 named failure cases against a real running dev server and
+real Postgres — see RELEASE_CHECKLIST.md for the full report. D042 is the one bug it found.
+
+## D042 — CSV import strips NUL bytes, not just a leading BOM
+**Date:** 2026-08-25
+Found live during this milestone's QA pass with a deliberately corrupted upload: a NUL byte
+anywhere in an uploaded CSV crashed the entire import with an unhandled 500 instead of being
+reported as an invalid row. Postgres's `text`/`jsonb` column types reject a NUL byte outright
+("unsupported Unicode escape sequence"), and even a row that fails validation — never reaching
+`Conversion.create` — has its raw content embedded verbatim in the import's `AuditLog` entry
+(`writeAuditLog`'s `after: summary`, see `conversions/actions.ts`), so that single write failed
+and took the whole request down with it. The identical failure would have hit
+`Conversion.rawPayload` directly for a row that *passed* validation but had a NUL byte in an
+ignored extra column — this was never reachable only because no test or real input had
+happened to include one until this QA pass manually crafted one. Fixed at the same layer as
+D038's BOM fix: `tokenizeCsv` now strips every NUL byte before tokenizing, so neither the audit
+log's summary nor any `Conversion.rawPayload` can ever contain one. Two regression tests added
+(a unit test on `parseCsv`, an integration test on `importPaybigCsv` with a NUL in an extra
+column of an otherwise-valid row); reproduced the original crash live in the browser before the
+fix and re-verified it resolved to a normal "invalid row" report after.
