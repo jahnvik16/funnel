@@ -83,17 +83,26 @@ sequenced here. Delivered together:
       including the critical invariant test: editing a campaign's `paybigUrl` after publishing
       does not change the already-published version's snapshot.
 
-## Phase 4 — Public route + click logging + funnel events
+## Phase 4 — Public route + click logging + funnel events (mostly done)
 
-- `GET /l/[token]` route handler: resolve link → current version → write `Click` →
-  (optional) age gate → execute path type → write `FunnelEvent`(s) → redirect. Resolve the
-  domain scoping via `(domainId, token)` (D015) and read routing data from
-  `TrackingLinkVersion.snapshot` (D016) rather than re-joining Campaign/SocialAccount/
-  TelegramBot — that's the whole point of the snapshot.
-- Implement the three V1 path type executors: `direct`, `aggregator`, `telegram`.
-- Age gate UI (simple interstitial, cookie/session remembered per visitor for a TTL — TBD).
-- Load test / sanity check the hot path for latency (this is the one route real users hit
-  directly from ads/social).
+- [x] `GET /l/[token]` → `/gate/[clickId]` (optional) → `/path/[clickId]` → `/out/[clickId]`,
+      exactly as designed: resolve `(domain, token)` → current version → write `Click` →
+      write `FunnelEvent`(s) at each step → redirect. Reads routing data from
+      `TrackingLinkVersion.snapshot` (D016) rather than re-joining Campaign/SocialAccount/
+      TelegramBot. See ARCHITECTURE.md §4 and DECISIONS.md D018.
+- [x] `direct` and `aggregator` path executors, both terminating at `/out/[clickId]`.
+- [x] Age gate UI: neutral, non-explicit interstitial; accept/decline both logged; no
+      cookie/session — the click id in the URL is the only state carried through (simpler
+      than the original "cookie/session remembered per visitor for a TTL" idea, and matches
+      the brief's "do not add scene/session attribution").
+- [x] Idempotency for `/out` and the gate's accept/decline (D020) — found via manual testing,
+      not originally planned, but necessary for correct event counts.
+- [ ] `telegram` path executor — explicitly deferred; a Telegram-path click fails safely
+      (`ROUTE_FAILED`, reason `unsupported_path_type`) rather than attempting a redirect with
+      no real destination. Revisit alongside the Telegram integration work in
+      OPEN_QUESTIONS.md.
+- [ ] Load test / sanity check the hot path for latency — not done. This is the one route
+      real users hit directly from ads/social; do this before real traffic depends on it.
 
 ## Phase 5 — Conversion ingestion + attribution
 

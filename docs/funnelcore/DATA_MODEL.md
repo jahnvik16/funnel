@@ -287,15 +287,22 @@ resolved version at click time.
 | clickedAt | DateTime | |
 
 ### FunnelEvent
-Step-by-step record of a click's progression through the funnel.
+Step-by-step record of a click's progression through the funnel. Written by
+`src/lib/public-routing.ts` — see ARCHITECTURE.md §4 for exactly where each step fires.
 
 | Field | Type | Notes |
 |---|---|---|
 | id | String | PK |
 | clickId | String | FK → Click |
-| stepType | FunnelStepType | `GATE_SHOWN \| GATE_PASSED \| GATE_FAILED \| REDIRECT_DIRECT \| REDIRECT_AGGREGATOR \| REDIRECT_TELEGRAM \| TELEGRAM_START \| PAYBIG_REDIRECT` |
-| metadata | Json? | |
+| stepType | FunnelStepType | `ROUTE_RESOLVED \| AGE_GATE_SHOWN \| AGE_GATE_ACCEPTED \| AGE_GATE_DECLINED \| AGGREGATOR_VIEWED \| AGGREGATOR_CONTINUE_CLICKED \| OUTBOUND_PAYBIG_REDIRECTED \| ROUTE_FAILED` |
+| metadata | Json? | e.g. `{pathType}` on `ROUTE_RESOLVED`, `{destinationUrl}` on `OUTBOUND_PAYBIG_REDIRECTED`, `{reason, pathType?}` on `ROUTE_FAILED` |
 | occurredAt | DateTime | |
+
+`OUTBOUND_PAYBIG_REDIRECTED` is written at most once per click — `executeOutbound` checks for
+an existing one first and replays its `destinationUrl` rather than duplicating (a redirect to
+an external host is a GET that a client/browser can legitimately retry). `AGE_GATE_ACCEPTED`
+and `AGE_GATE_DECLINED` have the same guard. `ROUTE_RESOLVED`, `AGE_GATE_SHOWN`, and
+`AGGREGATOR_VIEWED` are not deduplicated — repeat views are legitimate signal.
 
 ### TelegramStartPayload
 An opaque token embedded in a `t.me/<bot>?start=<token>` deep link so a Telegram bot start

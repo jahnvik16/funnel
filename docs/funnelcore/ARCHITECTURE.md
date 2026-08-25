@@ -69,10 +69,9 @@ This is not a generic workflow engine. The set of path types is fixed and small
 | Module | Responsibility | Must never |
 |---|---|---|
 | `app/(admin)` | Admin UI + Server Actions for CRUD, publish, audit view, reports | Contain per-brand/campaign conditional logic |
-| `app/l/[token]` | Public route: resolve token → version → execute path type | Contain any hardcoded brand/campaign/link behavior |
-| `app/api/conversions` | Inbound Paybig conversion ingestion | Trust unverified payloads; must attribute via Campaign/Click, never guess |
-| `lib/config` | Loading + resolving published configuration (link → version → path config) | Cache stale/unpublished data into the public path |
-| `lib/attribution` | Click writing, FunnelEvent writing, conversion joining | Mutate historical Click/TrackingLinkVersion rows |
+| `app/l/[token]`, `app/gate/[clickId]`, `app/path/[clickId]`, `app/out/[clickId]` | The public funnel — resolve, gate, execute path, egress (see §4) | Contain any hardcoded brand/campaign/link behavior; join a live mutable row when the frozen `snapshot` already has the answer |
+| `app/api/conversions` | Inbound Paybig conversion ingestion (not built yet — Phase 5) | Trust unverified payloads; must attribute via Campaign/Click, never guess |
+| `lib/public-routing` | Resolving `(domain, token)` → version, writing `Click`/`FunnelEvent`, the path/outbound decision logic | Depend on `next/headers` or any Next.js request/response type (must stay callable from tests without a request context, same reasoning as `lib/tracking-link-publishing`); re-query a live Campaign/SocialAccount/TelegramBot row when the snapshot already has what's needed |
 | `lib/crypto` | Field-level encryption/decryption for secrets (Telegram tokens, API credentials) | Ever return decrypted secrets to a client component or API response |
 | `lib/audit` | Recording before/after diffs for admin mutations | Be optional / skippable by any mutation path |
 | `lib/auth` | Password hashing/verification, session issuance/validation/revocation | Store a plaintext password or a raw (unhashed) session token; trust a cookie value without checking it against `Session` |
@@ -81,32 +80,43 @@ This is not a generic workflow engine. The set of path types is fixed and small
 
 ## 4. Request flow: public click
 
-1. Visitor requests `GET /l/{token}`.
-2. Route loads `TrackingLink` by `token` (indexed, unique). If missing/inactive → 404.
-3. Route loads the link's **current published** `TrackingLinkVersion` (immutable snapshot:
-   path type + path config + gate config + campaign + social account references at publish
-   time).
-4. A `Click` row is written immediately, capturing: `trackingLinkId`,
-   `trackingLinkVersionId`, `brandId`, `platformId`, `socialAccountId`, `campaignId`,
-   IP hash, user agent, referrer, UTM params, timestamp. This is the attribution snapshot —
-   later edits to the link/version never change this row.
-5. If the version has an age gate configured, the visitor is shown the gate
-   (`FunnelEvent: gate_shown`); on pass, `FunnelEvent: gate_passed` is written and the visitor
-   continues. On fail, the flow stops.
-6. The path type handler executes:
-   - `direct` → redirect to the version's configured destination URL.
-   - `aggregator` → redirect to the version's configured aggregator destination.
-   - `telegram` → redirect to a deep link built from the version's configured `TelegramBot`
-     + optional start payload (e.g. encoding the `clickId` for later attribution inside
-     Telegram).
-   A `FunnelEvent` is written for the redirect step (`redirect_direct` /
-   `redirect_aggregator` / `redirect_telegram`).
-7. Downstream, the visitor may reach Paybig. Paybig eventually reports a conversion.
-8. Conversion ingestion attributes the conversion to a `Click` (and therefore to a `Campaign`,
-   `TrackingLinkVersion`, `Brand`, `Platform`) using whatever join key Paybig provides
-   (click id passed through the redirect chain, or a Paybig-side campaign/sub-id mapped back
-   to our `Campaign`) — see OPEN_QUESTIONS.md for the exact join mechanism, which depends on
-   Paybig's actual redirect/postback contract.
+Implemented as four route segments, each doing the minimum needed for its step
+(`src/lib/public-routing.ts` holds the shared, framework-independent logic; every route file
+is a thin wrapper):
+
+1. **`GET /l/{token}`** (`app/l/[token]/route.ts`) — resolves the request's `Host` header to a
+   `Domain`, then the `(domainId, token)` pair to a `TrackingLink` (see DECISIONS.md D015).
+   Only an `ACTIVE` link with a published `currentVersion` resolves; anything else (unknown
+   domain, unknown token, `PAUSED`/`ARCHIVED` link, no published version) returns the same
+   generic "not available" response with **no `Click` created** — there's no version to
+   attribute one to, so there's nothing to log. In one transaction: a `Click` row is created
+   (attribution copied from the resolved version's frozen `snapshot` — brand, platform,
+   social account, campaign ids — never re-derived from live config), then `ROUTE_RESOLVED`
+   is written. The response redirects to `/gate/{clickId}` if the snapshot requires an age
+   gate, otherwise straight to `/path/{clickId}`.
+2. **`GET /gate/{clickId}`** (`app/gate/[clickId]/page.tsx`) — loads the `Click` + its frozen
+   snapshot by id (the id itself is the only state carried forward; no cookie/session). Writes
+   `AGE_GATE_SHOWN` and renders a neutral, non-explicit age-verification prompt. "Yes" (a
+   Server Action) writes `AGE_GATE_ACCEPTED` — idempotently, see below — and redirects to
+   `/path/{clickId}`. "No" writes `AGE_GATE_DECLINED` and redirects back to the same page with
+   a decline message; no external navigation.
+3. **`GET /path/{clickId}`** (`app/path/[clickId]/page.tsx`) — reads the snapshot's `pathType`:
+   `DIRECT` redirects straight to `/out/{clickId}` (no interim page, no event of its own —
+   the outbound event is logged at `/out`); `AGGREGATOR` writes `AGGREGATOR_VIEWED` and
+   renders an owned, neutral page (brand/campaign name, a "Continue" link to
+   `/out/{clickId}`); anything else (i.e. `TELEGRAM` — not implemented in the public route
+   yet) writes `ROUTE_FAILED` and renders a safe, generic unavailable message.
+4. **`GET /out/{clickId}`** (`app/out/[clickId]/route.ts`) — the single canonical egress
+   point for both `DIRECT` and `AGGREGATOR`. For `AGGREGATOR` it first writes
+   `AGGREGATOR_CONTINUE_CLICKED`, then resolves the destination URL from the snapshot's
+   `pathConfig` and writes `OUTBOUND_PAYBIG_REDIRECTED` before redirecting externally. **This
+   step is idempotent**: if a `OUTBOUND_PAYBIG_REDIRECTED` event already exists for the click
+   (e.g. a client-side redirect retry — observed in manual testing), it replays the same
+   destination from that event's metadata instead of writing a duplicate.
+
+Downstream, the visitor may reach Paybig. Paybig eventually reports a conversion. Conversion
+ingestion (not built yet — Phase 5) attributes it to a `Click` using whatever join key Paybig
+provides; see OPEN_QUESTIONS.md.
 
 ## 5. Versioning & immutability model
 

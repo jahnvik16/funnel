@@ -36,12 +36,28 @@ fixtures and deletes them in an `after` hook; see that file's comments before ad
   mismatch — each asserts zero rows written and the specific issue surfaced.
 - **Immutability regression**: create a click against version N, then publish version N+1;
   assert the original `Click` row's `trackingLinkVersionId` still points at N and reporting
-  aggregates built from it are unchanged. *(Not yet implemented — blocked on `Click` writes,
-  which don't exist until Phase 4's public route.)*
-- Public route resolution end-to-end: hit `/l/[token]` for each of `direct`/`aggregator`/
-  `telegram` path types, assert correct redirect target and correct `FunnelEvent` sequence.
-- Age gate: gate enabled → `gate_shown` event written, no redirect until pass;
-  gate disabled → no gate events, immediate redirect.
+  aggregates built from it are unchanged. *(Not yet implemented — no reporting queries exist
+  yet to assert "unchanged" against; the underlying data (Click pinned to a version) is
+  already covered by `recordClick copies attribution from the snapshot, not live config`.)*
+
+`src/lib/public-routing.test.ts` covers the public funnel (same real-Postgres, same fixture
+pattern — note its `deleteClick` helper, needed because `FunnelEvent` has a required FK to
+`Click`):
+- `resolveTrackingLinkVersion`: the happy path plus every failure reason (unknown domain,
+  inactive domain, unknown token, paused link, unpublished link) — each asserted by its
+  specific `reason` value, not just "fails."
+- Full `DIRECT` and `AGGREGATOR` flows: exact `FunnelEvent` sequence asserted in order
+  (`ROUTE_RESOLVED` → ... → `OUTBOUND_PAYBIG_REDIRECTED`), and the redirect destination
+  matches the published `pathConfig.destinationUrl`.
+- Age gate: shown → accepted (and, separately, shown → declined) — click context (the click
+  id itself) is confirmed to still resolve after the gate step.
+- Failure after a `Click` already exists: an unsupported (`TELEGRAM`) path type at `/path` and
+  at `/out` both fail safely and write `ROUTE_FAILED`; a corrupted/missing destination URL at
+  `/out` fails safely and writes `ROUTE_FAILED`.
+- **Idempotency**: calling the `/out` logic three times for one click produces exactly one
+  `OUTBOUND_PAYBIG_REDIRECTED` event and replays the same destination each time — this
+  regression test exists because manual browser testing caught a real triplication (see
+  DECISIONS.md D020).
 - Conversion ingestion idempotency: posting the same `paybigConversionId` twice results in
   one `Conversion` row, not two.
 - Audit logging: every CRUD mutation path produces exactly one `AuditLog` row with the

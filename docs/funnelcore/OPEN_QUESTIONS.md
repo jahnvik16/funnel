@@ -36,8 +36,16 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   gets credit? Current model is last-click-per-Click-row; no multi-touch model designed yet.
 - Click fraud / bot traffic filtering — not addressed in V1 schema at all. Needs a decision
   on whether to filter at ingestion or flag-and-report.
-- IP hashing scheme and retention period for raw IP (currently: hash before storage, no raw
-  IP retention — but the specific hash algorithm and any salt/rotation policy isn't decided).
+- IP hashing scheme and retention period for raw IP (currently: `lib/public-routing.ts`'s
+  `hashIp` does an unsalted SHA-256 of the raw IP before it ever touches storage — satisfies
+  "hash before storage, no raw IP retention" but has no salt/rotation policy; a determined
+  attacker with a candidate IP list could still confirm membership. Revisit before this
+  matters for compliance purposes).
+- **`pathConfig.destinationUrl` vs. `campaign.paybigUrl` as the actual `/out` redirect
+  target** (see DECISIONS.md D019): the public route currently redirects to
+  `pathConfig.destinationUrl`. Once Paybig's actual integration contract is known, confirm
+  whether that's still correct or whether `campaign.paybigUrl` (possibly with click-id/sub-id
+  parameters appended) should be the real destination instead.
 
 ## Auth / RBAC
 - V1 schema has `AdminRole: ADMIN | VIEWER`. Is that sufficient, or do specific brands need

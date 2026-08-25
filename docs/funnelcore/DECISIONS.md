@@ -174,3 +174,58 @@ imported Server Actions to call directly (both are plain async functions from th
 perspective), wrapped in `useTransition` for pending state. Both actions return the same
 `PublishFormState` shape (`{ error?, issues?, validated? }`) so one render path displays
 either outcome.
+
+## D018 — Public route split into four segments (`/l`, `/gate`, `/path`, `/out`), not one handler
+**Date:** 2026-08-25
+The milestone's brief specified this shape directly, and it maps cleanly onto the funnel's
+actual state machine: `/l/{token}` only ever runs once per click (resolve + create Click);
+`/gate/{clickId}` is skippable (only visited when the version requires it); `/path/{clickId}`
+is where path-type branching lives and is the only place that renders the owned aggregator
+page; `/out/{clickId}` is the single place external egress happens, regardless of which path
+type got you there. Splitting them means each route file stays small and each step's
+`FunnelEvent` is written at the one place that step actually happens, rather than threaded
+through a single handler's branches. `src/lib/public-routing.ts` holds the actual logic
+(resolution, Click/event writing, the path/outbound decisions) so the four route files are
+thin — the same "framework-independent core, thin route wrapper" split as
+`lib/tracking-link-publishing.ts`.
+
+## D019 — The public route redirects to `pathConfig.destinationUrl`, not `campaign.paybigUrl`
+**Date:** 2026-08-25
+Both fields exist on the resolved snapshot. `pathConfig.destinationUrl` is the field the
+`direct`/`aggregator` publish form actually collects and validates as the link's destination
+(carried over from Phase 0's original design); `campaign.paybigUrl` was added later
+specifically to represent "the Paybig destination for this lane" as attribution metadata,
+not necessarily as a literal redirect target admins configure per link. Given the milestone's
+explicit instruction not to invent new admin-facing fields, `pathConfig.destinationUrl` is
+used as the actual `/out` redirect target for both path types, and `OUTBOUND_PAYBIG_REDIRECTED`
+fires regardless (the event name reflects "this is the funnel's terminal handoff step," not a
+literal claim about which URL field was used). This is a judgment call, not a settled
+requirement — flagged in OPEN_QUESTIONS.md for reconciliation once the real Paybig contract
+is known.
+
+## D020 — `/out` and the age-gate "accept"/"decline" actions are idempotent
+**Date:** 2026-08-25
+Manual browser testing surfaced this directly: accepting the age gate (a Server Action
+redirecting to `/path`, which redirects to `/out`, which redirects externally) produced three
+`OUTBOUND_PAYBIG_REDIRECTED` events for one click — the client re-issued the `/out` GET
+multiple times (observed after the external redirect target failed to resolve; likely
+browser/runtime retry behavior around a cross-origin redirect, not application code).
+`executeOutbound` now checks for an existing `OUTBOUND_PAYBIG_REDIRECTED` event first and, if
+found, replays its recorded `destinationUrl` without writing a new event or re-running the
+`AGGREGATOR_CONTINUE_CLICKED` write. `acceptAgeGate`/`declineAgeGate` got the same guard via
+the new `hasFunnelEvent` helper. `ROUTE_RESOLVED`, `AGE_GATE_SHOWN`, and `AGGREGATOR_VIEWED`
+are deliberately *not* deduplicated — those represent genuine repeat views, not a completed
+state transition. See `src/lib/public-routing.test.ts`'s idempotency test.
+
+## D021 — `FunnelStepType` fully replaced, not extended
+**Date:** 2026-08-25
+The enum from Phase 0 (`GATE_SHOWN`, `REDIRECT_DIRECT`, `PAYBIG_REDIRECT`, `TELEGRAM_START`,
+etc.) predated this milestone's exact event vocabulary and had zero rows written against it
+(nothing had implemented the public route yet). Replaced outright with the milestone's named
+events (`ROUTE_RESOLVED`, `AGE_GATE_SHOWN/ACCEPTED/DECLINED`, `AGGREGATOR_VIEWED`,
+`AGGREGATOR_CONTINUE_CLICKED`, `OUTBOUND_PAYBIG_REDIRECTED`, `ROUTE_FAILED`) rather than kept
+alongside them — safe only because the table was empty; would need a real data migration if
+this ever needs to change again after real events exist. `TELEGRAM_START` was dropped rather
+than kept unused — it can be reintroduced accurately once the Telegram path is actually
+implemented (see CLAUDE.md "do not add a 4th path type" reasoning, applied here to unused
+enum values as much as path types).
