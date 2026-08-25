@@ -224,17 +224,20 @@ of these rows. The link itself is a stable pointer; behavior lives in its versio
 |---|---|---|
 | id | String | PK |
 | label | String | human-readable name; not used in routing |
-| token | String | unique, used in `/l/{token}`, immutable after creation (see DECISIONS.md D013) |
+| token | String | routing key **within its domain**, immutable after creation (see DECISIONS.md D013, D015) |
 | brandId | String | FK → Brand, immutable after creation |
 | domainId | String | FK → Domain |
 | currentVersionId | String? | FK → TrackingLinkVersion, null until first publish |
 | status | LinkStatus | `ACTIVE \| PAUSED \| ARCHIVED` |
 | createdAt / updatedAt | DateTime | |
 
+Unique on `(domainId, token)` — not a global unique on `token` alone. See D015.
+
 ### TrackingLinkVersion
 **Immutable published snapshot.** Created on every publish; never updated after creation.
 Historical `Click` rows reference the exact version that was live when the click happened, so
-editing a link later cannot change past attribution.
+editing a link later cannot change past attribution. Publishing is gated by validation — see
+[ARCHITECTURE.md §5a](ARCHITECTURE.md) and `src/lib/tracking-link-publishing.ts`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -242,15 +245,21 @@ editing a link later cannot change past attribution.
 | trackingLinkId | String | FK → TrackingLink |
 | versionNumber | Int | monotonically increasing per link |
 | pathType | PathType | `DIRECT \| AGGREGATOR \| TELEGRAM` |
-| campaignId | String | FK → Campaign (Paybig lane attribution) |
-| socialAccountId | String? | FK → SocialAccount |
+| campaignId | String | FK → Campaign (Paybig lane attribution) — structural FK for reporting joins |
+| socialAccountId | String? | FK → SocialAccount — structural FK for reporting joins |
 | telegramBotId | String? | FK → TelegramBot, set only when `pathType = TELEGRAM` |
 | ageGateEnabled | Boolean | |
 | pathConfig | Json | path-type-specific fields (destination URL for `direct`/`aggregator`; start-param template for `telegram`) |
+| snapshot | Json | **frozen execution snapshot** — domain, token, brand, platform, campaign (incl. Paybig destination), social account, path type/config, age gate, experiment/arm context, all copied at publish time. Contains no secrets. See D016. |
 | publishedAt | DateTime | |
 | publishedById | String | FK → AdminUser |
 
 Unique on `(trackingLinkId, versionNumber)`.
+
+The `campaignId`/`socialAccountId`/`telegramBotId` FK columns and the `snapshot` JSON serve
+different purposes and are both kept: the FKs exist for reporting joins (Phase 6) against
+live rows; `snapshot` exists so routing execution never needs to join a mutable row at all,
+which is what makes the "editing a campaign later can't change history" guarantee hold.
 
 > **Note:** Prisma/Postgres do not enforce "`telegramBotId` is set if and only if
 > `pathType = TELEGRAM`" as a DB constraint in V1 — this is validated at the application layer

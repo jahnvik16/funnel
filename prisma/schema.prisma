@@ -313,7 +313,8 @@ model ExperimentArm {
 model TrackingLink {
   id                String   @id @default(cuid())
   label             String
-  token             String   @unique
+  // Token is the routing key within a domain, not globally — see DECISIONS.md D015.
+  token             String
   brandId           String
   brand             Brand    @relation(fields: [brandId], references: [id])
   domainId          String
@@ -328,6 +329,7 @@ model TrackingLink {
   clicks      Click[]
   experiments Experiment[]
 
+  @@unique([domainId, token])
   @@map("tracking_links")
 }
 
@@ -346,6 +348,13 @@ model TrackingLinkVersion {
   telegramBot      TelegramBot? @relation(fields: [telegramBotId], references: [id])
   ageGateEnabled   Boolean  @default(false)
   pathConfig       Json
+  // Denormalized copy of everything routing needs at click time — domain,
+  // token, brand, platform, campaign (incl. Paybig destination), social
+  // account, path type/config, age gate, experiment/arm context. Frozen at
+  // publish time so a later edit to any of those mutable rows (e.g. a
+  // campaign's Paybig URL) can never retroactively change this version's
+  // behavior. Never contains secrets — see DECISIONS.md D016.
+  snapshot         Json
   publishedAt      DateTime @default(now())
   publishedById    String
   publishedBy      AdminUser @relation(fields: [publishedById], references: [id])

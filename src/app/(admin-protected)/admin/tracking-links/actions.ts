@@ -6,6 +6,11 @@ import { Prisma, PathType, LinkStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/guard";
 import { writeAuditLog } from "@/lib/audit";
+import {
+  validateTrackingLinkConfig,
+  publishTrackingLinkVersion as publishTrackingLinkVersionCore,
+  type ValidationIssue,
+} from "@/lib/tracking-link-publishing";
 
 export type FormState = { error?: string };
 
@@ -62,7 +67,7 @@ export async function createTrackingLink(
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      return { error: "That token is already in use." };
+      return { error: "That token is already in use on this domain." };
     }
     throw error;
   }
@@ -73,7 +78,6 @@ export async function createTrackingLink(
 const updateLinkSchema = z.object({
   label: z.string().trim().min(1, "Label is required."),
   domainId: z.string().trim().min(1, "Domain is required."),
-  status: z.nativeEnum(LinkStatus),
 });
 
 export async function updateTrackingLinkDetails(
@@ -85,7 +89,6 @@ export async function updateTrackingLinkDetails(
   const parsed = updateLinkSchema.safeParse({
     label: formData.get("label"),
     domainId: formData.get("domainId"),
-    status: formData.get("status"),
   });
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Invalid input." };
@@ -99,59 +102,90 @@ export async function updateTrackingLinkDetails(
     return { error: error instanceof Error ? error.message : "Invalid domain." };
   }
 
-  await prisma.$transaction(async (tx) => {
-    const after = await tx.trackingLink.update({ where: { id }, data: parsed.data });
+  try {
+    await prisma.$transaction(async (tx) => {
+      const after = await tx.trackingLink.update({ where: { id }, data: parsed.data });
+      await writeAuditLog(tx, {
+        actorId: admin.id,
+        action: "UPDATE",
+        entityType: "TrackingLink",
+        entityId: id,
+        before,
+        after,
+      });
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return { error: "That token is already in use on this domain." };
+    }
+    throw error;
+  }
+
+  redirect(`/admin/tracking-links/${id}`);
+}
+
+// --- Lifecycle: Activate / Pause / Archive ---------------------------------
+
+async function setTrackingLinkStatus(
+  formData: FormData,
+  status: LinkStatus,
+  action: "ACTIVATE" | "PAUSE" | "ARCHIVE",
+) {
+  const admin = await requireAdmin();
+  const id = String(formData.get("id"));
+
+  const linkId = await prisma.$transaction(async (tx) => {
+    const before = await tx.trackingLink.findUniqueOrThrow({ where: { id } });
+    const after = await tx.trackingLink.update({ where: { id }, data: { status } });
     await writeAuditLog(tx, {
       actorId: admin.id,
-      action: "UPDATE",
+      action,
       entityType: "TrackingLink",
       entityId: id,
       before,
       after,
     });
+    return after.id;
   });
 
-  redirect(`/admin/tracking-links/${id}`);
+  redirect(`/admin/tracking-links/${linkId}`);
 }
 
-const publishSchema = z
-  .object({
-    trackingLinkId: z.string().trim().min(1),
-    campaignId: z.string().trim().min(1, "Campaign is required."),
-    socialAccountId: z.string().trim().optional().transform((v) => (v ? v : null)),
-    pathType: z.nativeEnum(PathType),
-    destinationUrl: z.string().trim().optional(),
-    telegramBotId: z.string().trim().optional(),
-    startParamTemplate: z.string().trim().optional().transform((v) => (v ? v : undefined)),
-    ageGateEnabled: z.coerce.boolean().default(false),
-    experimentArmId: z.string().trim().optional().transform((v) => (v ? v : null)),
-  })
-  .superRefine((data, ctx) => {
-    if (data.pathType === PathType.DIRECT || data.pathType === PathType.AGGREGATOR) {
-      if (!data.destinationUrl || !z.string().url().safeParse(data.destinationUrl).success) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "A valid destination URL is required for this path type.",
-          path: ["destinationUrl"],
-        });
-      }
-    } else if (data.pathType === PathType.TELEGRAM) {
-      if (!data.telegramBotId) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "A Telegram bot is required for the Telegram path type.",
-          path: ["telegramBotId"],
-        });
-      }
-    }
-  });
+export async function activateTrackingLink(formData: FormData): Promise<void> {
+  await setTrackingLinkStatus(formData, "ACTIVE", "ACTIVATE");
+}
 
-export async function publishTrackingLinkVersion(
-  _prevState: FormState,
-  formData: FormData,
-): Promise<FormState> {
-  const admin = await requireAdmin();
-  const parsed = publishSchema.safeParse({
+export async function pauseTrackingLink(formData: FormData): Promise<void> {
+  await setTrackingLinkStatus(formData, "PAUSED", "PAUSE");
+}
+
+export async function archiveTrackingLink(formData: FormData): Promise<void> {
+  await setTrackingLinkStatus(formData, "ARCHIVED", "ARCHIVE");
+}
+
+// --- Validate / Publish -----------------------------------------------------
+
+export type PublishFormState = {
+  error?: string;
+  issues?: ValidationIssue[];
+  validated?: boolean;
+};
+
+const publishInputSchema = z.object({
+  trackingLinkId: z.string().trim().min(1),
+  campaignId: z.string().trim().min(1, "Campaign is required."),
+  socialAccountId: z.string().trim().optional(),
+  pathType: z.nativeEnum(PathType),
+  destinationUrl: z.string().trim().optional(),
+  telegramBotId: z.string().trim().optional(),
+  startParamTemplate: z.string().trim().optional(),
+  ageGateEnabled: z.coerce.boolean().default(false),
+  experimentId: z.string().trim().optional(),
+  experimentArmId: z.string().trim().optional(),
+});
+
+function parsePublishInput(formData: FormData) {
+  const parsed = publishInputSchema.safeParse({
     trackingLinkId: formData.get("trackingLinkId"),
     campaignId: formData.get("campaignId"),
     socialAccountId: formData.get("socialAccountId") || undefined,
@@ -160,72 +194,60 @@ export async function publishTrackingLinkVersion(
     telegramBotId: formData.get("telegramBotId") || undefined,
     startParamTemplate: formData.get("startParamTemplate") || undefined,
     ageGateEnabled: formData.get("ageGateEnabled") === "on",
+    experimentId: formData.get("experimentId") || undefined,
     experimentArmId: formData.get("experimentArmId") || undefined,
   });
   if (!parsed.success) {
-    return { error: parsed.error.issues[0]?.message ?? "Invalid input." };
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input." } as const;
+  }
+  const d = parsed.data;
+  return {
+    input: {
+      trackingLinkId: d.trackingLinkId,
+      campaignId: d.campaignId,
+      socialAccountId: d.socialAccountId ?? null,
+      pathType: d.pathType,
+      destinationUrl: d.destinationUrl,
+      telegramBotId: d.telegramBotId ?? null,
+      startParamTemplate: d.startParamTemplate,
+      ageGateEnabled: d.ageGateEnabled,
+      experimentId: d.experimentId ?? null,
+      experimentArmId: d.experimentArmId ?? null,
+    },
+  } as const;
+}
+
+export async function validateTrackingLinkVersionInput(
+  _prevState: PublishFormState,
+  formData: FormData,
+): Promise<PublishFormState> {
+  await requireAdmin();
+  const parsed = parsePublishInput(formData);
+  if ("error" in parsed) {
+    return { error: parsed.error };
   }
 
-  const data = parsed.data;
-  const isTelegram = data.pathType === PathType.TELEGRAM;
-  const pathConfig: Prisma.InputJsonValue = isTelegram
-    ? { startParamTemplate: data.startParamTemplate ?? null }
-    : { destinationUrl: data.destinationUrl };
+  const result = await validateTrackingLinkConfig(prisma, parsed.input);
+  return { validated: true, issues: result.issues };
+}
 
-  await prisma.$transaction(async (tx) => {
-    const link = await tx.trackingLink.findUniqueOrThrow({ where: { id: data.trackingLinkId } });
+export async function publishTrackingLinkVersion(
+  _prevState: PublishFormState,
+  formData: FormData,
+): Promise<PublishFormState> {
+  const admin = await requireAdmin();
+  const parsed = parsePublishInput(formData);
+  if ("error" in parsed) {
+    return { error: parsed.error };
+  }
 
-    const lastVersion = await tx.trackingLinkVersion.findFirst({
-      where: { trackingLinkId: link.id },
-      orderBy: { versionNumber: "desc" },
-      select: { versionNumber: true },
-    });
-    const versionNumber = (lastVersion?.versionNumber ?? 0) + 1;
+  const result = await prisma.$transaction((tx) =>
+    publishTrackingLinkVersionCore(tx, parsed.input, admin.id),
+  );
 
-    const version = await tx.trackingLinkVersion.create({
-      data: {
-        trackingLinkId: link.id,
-        versionNumber,
-        pathType: data.pathType,
-        campaignId: data.campaignId,
-        socialAccountId: data.socialAccountId,
-        telegramBotId: isTelegram ? data.telegramBotId : null,
-        ageGateEnabled: data.ageGateEnabled,
-        pathConfig,
-        publishedById: admin.id,
-      },
-    });
+  if (!result.ok) {
+    return { issues: result.issues };
+  }
 
-    const linkAfter = await tx.trackingLink.update({
-      where: { id: link.id },
-      data: { currentVersionId: version.id },
-    });
-
-    await writeAuditLog(tx, {
-      actorId: admin.id,
-      action: "PUBLISH",
-      entityType: "TrackingLink",
-      entityId: link.id,
-      before: link,
-      after: { ...linkAfter, publishedVersion: version },
-    });
-
-    if (data.experimentArmId) {
-      const armBefore = await tx.experimentArm.findUniqueOrThrow({ where: { id: data.experimentArmId } });
-      const armAfter = await tx.experimentArm.update({
-        where: { id: data.experimentArmId },
-        data: { trackingLinkVersionId: version.id },
-      });
-      await writeAuditLog(tx, {
-        actorId: admin.id,
-        action: "UPDATE",
-        entityType: "ExperimentArm",
-        entityId: data.experimentArmId,
-        before: armBefore,
-        after: armAfter,
-      });
-    }
-  });
-
-  redirect(`/admin/tracking-links/${data.trackingLinkId}`);
+  redirect(`/admin/tracking-links/${parsed.input.trackingLinkId}`);
 }

@@ -1,6 +1,13 @@
 import type { Prisma } from "@prisma/client";
 
-export type AuditAction = "CREATE" | "UPDATE" | "ARCHIVE" | "UNARCHIVE" | "PUBLISH";
+export type AuditAction =
+  | "CREATE"
+  | "UPDATE"
+  | "ARCHIVE"
+  | "UNARCHIVE"
+  | "PUBLISH"
+  | "PAUSE"
+  | "ACTIVATE";
 
 type WriteAuditLogParams = {
   actorId: string;

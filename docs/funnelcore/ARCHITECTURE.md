@@ -76,6 +76,7 @@ This is not a generic workflow engine. The set of path types is fixed and small
 | `lib/crypto` | Field-level encryption/decryption for secrets (Telegram tokens, API credentials) | Ever return decrypted secrets to a client component or API response |
 | `lib/audit` | Recording before/after diffs for admin mutations | Be optional / skippable by any mutation path |
 | `lib/auth` | Password hashing/verification, session issuance/validation/revocation | Store a plaintext password or a raw (unhashed) session token; trust a cookie value without checking it against `Session` |
+| `lib/tracking-link-publishing` | Validating a proposed TrackingLink configuration and, if valid, publishing an immutable `TrackingLinkVersion` with a frozen snapshot | Write anything when validation fails; depend on `next/headers`/`requireAdmin` (must stay callable from tests without a request context) |
 | `prisma/` | Schema, migrations | Contain seed data that hardcodes real brands/campaigns |
 
 ## 4. Request flow: public click
@@ -120,6 +121,37 @@ This is not a generic workflow engine. The set of path types is fixed and small
 - The same pattern (append-only, reference the version at write time) applies anywhere else
   attribution-relevant config can change — this is the mechanism that satisfies "historical
   attribution must not change."
+
+## 5a. Validation gate — a TrackingLink is executable only once it passes
+
+`src/lib/tracking-link-publishing.ts` is a plain (non-`"use server"`) module with no
+`next/headers`/`requireAdmin` dependency, so it can be exercised directly from integration
+tests as well as from the admin Server Actions:
+
+- `validateTrackingLinkConfig(db, input)` — read-only. Loads the tracking link, campaign,
+  social account, Telegram bot, and experiment arm referenced by `input`, and returns every
+  rule violation found (not just the first), covering: domain/brand/campaign/social-account/
+  Telegram-bot/experiment-arm existence and active status, campaign↔link brand match,
+  social-account↔campaign platform match, Telegram-bot requirement for the `telegram` path
+  type, destination-URL validity for `direct`/`aggregator`, experiment-arm↔experiment
+  membership, and token uniqueness within the link's domain. Backs the admin's **Validate**
+  button.
+- `publishTrackingLinkVersion(tx, input, publishedById)` — must be called inside a
+  `$transaction`. Re-runs the same validation; if anything fails, returns the issues and
+  writes nothing. If valid, it creates the immutable `TrackingLinkVersion` (with its frozen
+  `snapshot`, see below), points `TrackingLink.currentVersionId` at it, forces
+  `TrackingLink.status` to `ACTIVE`, links the chosen `ExperimentArm` if any, and writes the
+  `PUBLISH` audit log entry — all atomically. Backs the admin's **Publish** button, which
+  therefore can never produce a "live" version that failed validation.
+
+**The frozen snapshot.** Every `TrackingLinkVersion.snapshot` captures domain, token, brand,
+platform, campaign (including its Paybig destination URL), social account, path type/config,
+age gate flag, and experiment/arm context, copied by value at publish time — never a live
+reference. This is what makes the core invariant hold: **editing a campaign's Paybig URL (or
+any other mutable config) tomorrow cannot change what an already-published version resolves
+to.** See `src/lib/tracking-link-publishing.test.ts` for the test that proves this directly.
+The snapshot deliberately contains no secrets (no ciphertext, no raw Telegram token) — see
+CLAUDE.md rule 11/12.
 
 ## 6. Security model
 

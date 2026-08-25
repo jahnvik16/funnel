@@ -22,11 +22,22 @@
   `Conversion.paybigConversionId`, `(trackingLinkId, versionNumber)`.
 
 ### Integration tests (against a real local Postgres via Docker Compose)
+`src/lib/tracking-link-publishing.test.ts` runs these against the same dev database used by
+`npm run dev` (there is no separate test database yet — each test creates uniquely-named
+fixtures and deletes them in an `after` hook; see that file's comments before adding more).
 - Publish flow: publishing a new `TrackingLinkVersion` updates `TrackingLink.currentVersionId`
   and leaves the previous version row byte-for-byte unchanged.
+- **CRITICAL INVARIANT (implemented)**: publish a version, then change the campaign's
+  `paybigUrl`; assert the published version's `snapshot.campaign.paybigUrl` is unchanged while
+  the live `Campaign.paybigUrl` reflects the edit. Also assert the full `snapshot` JSON is
+  byte-for-byte identical before and after (`assert.deepEqual`).
+- Validation rejection coverage: archived campaign, missing/inactive Telegram bot for the
+  `telegram` path type, social-account/tracking-link brand mismatch, experiment-arm/experiment
+  mismatch — each asserts zero rows written and the specific issue surfaced.
 - **Immutability regression**: create a click against version N, then publish version N+1;
   assert the original `Click` row's `trackingLinkVersionId` still points at N and reporting
-  aggregates built from it are unchanged.
+  aggregates built from it are unchanged. *(Not yet implemented — blocked on `Click` writes,
+  which don't exist until Phase 4's public route.)*
 - Public route resolution end-to-end: hit `/l/[token]` for each of `direct`/`aggregator`/
   `telegram` path types, assert correct redirect target and correct `FunnelEvent` sequence.
 - Age gate: gate enabled → `gate_shown` event written, no redirect until pass;

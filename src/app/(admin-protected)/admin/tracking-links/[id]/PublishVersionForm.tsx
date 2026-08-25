@@ -1,13 +1,16 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useRef, useState, useTransition, type FormEvent } from "react";
 import type { Campaign, Experiment, ExperimentArm, SocialAccount } from "@prisma/client";
 import { PathType } from "@prisma/client";
 import { ui } from "@/lib/ui";
-import { SubmitButton } from "../../_components/SubmitButton";
-import { publishTrackingLinkVersion, type FormState } from "../actions";
+import {
+  validateTrackingLinkVersionInput,
+  publishTrackingLinkVersion,
+  type PublishFormState,
+} from "../actions";
 
-const initialState: FormState = {};
+const initialState: PublishFormState = {};
 
 type TelegramBotOption = { id: string; name: string; status: string };
 type ExperimentWithArms = Experiment & { arms: ExperimentArm[] };
@@ -25,11 +28,26 @@ export function PublishVersionForm({
   telegramBots: TelegramBotOption[];
   experiments: ExperimentWithArms[];
 }) {
-  const [state, formAction] = useActionState(publishTrackingLinkVersion, initialState);
+  const [state, setState] = useState<PublishFormState>(initialState);
+  const [pending, startTransition] = useTransition();
   const [pathType, setPathType] = useState<PathType>(PathType.DIRECT);
   const [experimentId, setExperimentId] = useState<string>("");
+  const formRef = useRef<HTMLFormElement>(null);
 
   const arms = experiments.find((e) => e.id === experimentId)?.arms ?? [];
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const intent = submitter?.value === "validate" ? "validate" : "publish";
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      const action = intent === "validate" ? validateTrackingLinkVersionInput : publishTrackingLinkVersion;
+      const result = await action(state, formData);
+      setState(result);
+    });
+  }
 
   if (campaigns.length === 0) {
     return (
@@ -40,7 +58,7 @@ export function PublishVersionForm({
   }
 
   return (
-    <form action={formAction} className={ui.form}>
+    <form ref={formRef} onSubmit={handleSubmit} className={ui.form}>
       <input type="hidden" name="trackingLinkId" value={trackingLinkId} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label className={ui.label}>
@@ -119,6 +137,7 @@ export function PublishVersionForm({
         <label className={ui.label}>
           Experiment (optional)
           <select
+            name="experimentId"
             className={ui.select}
             value={experimentId}
             onChange={(e) => setExperimentId(e.target.value)}
@@ -145,11 +164,29 @@ export function PublishVersionForm({
       </div>
       <p className={ui.muted}>
         Publishing creates a new immutable version and makes it the current version for this
-        link. Past versions and the clicks attributed to them are never changed.
+        link. Past versions and the clicks attributed to them are never changed. Validate
+        checks the same rules without publishing anything.
       </p>
+
       {state.error ? <p className={ui.error}>{state.error}</p> : null}
-      <div>
-        <SubmitButton pendingLabel="Publishing…">Publish version</SubmitButton>
+      {state.issues && state.issues.length > 0 ? (
+        <ul className={`${ui.error} list-inside list-disc`}>
+          {state.issues.map((issue, index) => (
+            <li key={`${issue.field}-${index}`}>{issue.message}</li>
+          ))}
+        </ul>
+      ) : null}
+      {state.validated && (!state.issues || state.issues.length === 0) ? (
+        <p className={ui.success}>This configuration is valid and ready to publish.</p>
+      ) : null}
+
+      <div className="flex gap-3">
+        <button type="submit" name="intent" value="validate" disabled={pending} className={ui.secondaryButton}>
+          {pending ? "Checking…" : "Validate"}
+        </button>
+        <button type="submit" name="intent" value="publish" disabled={pending} className={ui.primaryButton}>
+          {pending ? "Publishing…" : "Publish version"}
+        </button>
       </div>
     </form>
   );

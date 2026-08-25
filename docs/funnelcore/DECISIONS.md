@@ -133,3 +133,44 @@ never fetched for any page/component — see ARCHITECTURE.md `lib/auth` row and 
 11) were moved into sibling `selects.ts` files rather than living alongside the actions that
 use them. Purely a module-boundary consequence of the framework constraint, not a design
 change to what the constants do.
+
+## D015 — `TrackingLink.token` is unique per domain, not globally
+**Date:** 2026-08-25
+The validation milestone's explicit rule is "token is unique for that domain," not globally.
+Changed `TrackingLink.token`'s constraint from a bare `@unique` to `@@unique([domainId,
+token])`. This is a deliberate loosening: the same short token can now be reused across two
+different domains (e.g. two white-labeled domains both serving a `"spring2026"` link),
+matching how the public route's real routing key is the `(domain, token)` pair, not the token
+alone. `validateTrackingLinkConfig` also checks this explicitly rather than only relying on
+the DB constraint, so publishing gives a friendly error instead of a raw unique-violation.
+
+## D016 — `TrackingLinkVersion.snapshot`: a frozen, denormalized copy for routing; FKs kept for reporting
+**Date:** 2026-08-25
+The milestone's core invariant ("editing a campaign's Paybig URL tomorrow must not change an
+already-published version") cannot hold if the eventual public route resolves a version by
+joining live Campaign/SocialAccount/TelegramBot rows — those rows are mutable by design.
+`TrackingLinkVersion.snapshot` (JSON) copies everything routing needs — domain, token, brand,
+platform, campaign incl. Paybig URL, social account, path type/config, age gate, experiment/
+arm — by value at publish time. The existing `campaignId`/`socialAccountId`/`telegramBotId`
+foreign keys are kept alongside it, not replaced: they exist for reporting joins against
+current rows (Phase 6), a different job than freezing historical execution data. The snapshot
+never includes ciphertext or raw secrets (CLAUDE.md rule 11/12) — only non-secret identifying
+fields (e.g. `telegramBot: {id, name}`, never a token).
+
+Because this is a genuinely new required column and the project has no production data yet
+(only local dev/test fixtures), the migration adds `snapshot` as `NOT NULL` directly rather
+than adding it nullable and backfilling via a data migration — the one pre-existing local test
+row was deleted before migrating rather than backfilled. Revisit this simplification if a
+migration is ever needed against a database that holds real `TrackingLinkVersion` rows.
+
+## D017 — Validate and Publish share one form via a submitter-driven client handler, not `useActionState`
+**Date:** 2026-08-25
+The publish form needed two distinct behaviors (dry-run validate vs. write-and-redirect
+publish) over the *same* field values, plus a list of validation issues rather than one error
+string. `useActionState` binds a form to exactly one Server Action, and per-button
+`formAction` overrides don't compose cleanly with it. Instead, `PublishVersionForm` uses a
+plain `onSubmit` handler that reads `event.nativeEvent.submitter` to pick which of the two
+imported Server Actions to call directly (both are plain async functions from the client's
+perspective), wrapped in `useTransition` for pending state. Both actions return the same
+`PublishFormState` shape (`{ error?, issues?, validated? }`) so one render path displays
+either outcome.

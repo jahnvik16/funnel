@@ -55,19 +55,41 @@ sequenced here. Delivered together:
       written into an `AuditLog` row unredacted.
 - [x] `lib/telegram.ts` format-only bot token validation (see DECISIONS.md D012 — no live
       Telegram API call in this milestone).
-- [x] `TrackingLink` CRUD (label/domain/status editable, brand/token fixed at creation — D013)
-      plus a publish flow: builds a `TrackingLinkVersion`, updates
-      `TrackingLink.currentVersionId`, and optionally attaches the new version to an existing
-      `ExperimentArm`, all in one transaction with an audit log entry.
+- [x] `TrackingLink` CRUD (label/domain editable, brand/token fixed at creation — D013) plus a
+      first-pass publish flow (superseded by Phase 3b below).
 - [x] Admin nav shell linking all nine list pages.
 - Not resolved by this milestone: the Paybig integration contract (still open — see
   OPEN_QUESTIONS.md); `Campaign.paybigCampaignRef` was replaced with `paybigUrl` (a direct
   destination URL) per the updated brief, which sidesteps needing that contract decided yet.
 
+## Phase 3b — TrackingLink validation, publishing, versioning, and lifecycle (done)
+
+- [x] `lib/tracking-link-publishing.ts` — a full validation rule set (domain/brand/campaign/
+      social-account/Telegram-bot/experiment-arm existence and active status, cross-entity
+      relationship checks, path-config validity, token-per-domain uniqueness) plus the publish
+      transaction, kept framework-independent so it's directly testable.
+- [x] `TrackingLinkVersion.snapshot` — a frozen, denormalized copy of everything routing needs
+      (domain, token, brand, platform, campaign + Paybig URL, social account, path type/config,
+      age gate, experiment/arm), captured at publish time. See DECISIONS.md D016.
+- [x] `TrackingLink.token` uniqueness changed from global to per-domain (`@@unique([domainId,
+      token])`) — see DECISIONS.md D015.
+- [x] Admin UI: **Validate** (dry-run, shows every issue found) and **Publish** (validates,
+      then writes) as two buttons over one form; **Activate**/**Pause**/**Archive** lifecycle
+      buttons; a **Current published version** summary reading the frozen snapshot, alongside
+      the existing full version-history table.
+- [x] Publishing forces `TrackingLink.status = ACTIVE`; publishing is itself blocked by
+      validation when the link is `ARCHIVED`.
+- [x] `src/lib/tracking-link-publishing.test.ts` — integration tests against real Postgres,
+      including the critical invariant test: editing a campaign's `paybigUrl` after publishing
+      does not change the already-published version's snapshot.
+
 ## Phase 4 — Public route + click logging + funnel events
 
 - `GET /l/[token]` route handler: resolve link → current version → write `Click` →
-  (optional) age gate → execute path type → write `FunnelEvent`(s) → redirect.
+  (optional) age gate → execute path type → write `FunnelEvent`(s) → redirect. Resolve the
+  domain scoping via `(domainId, token)` (D015) and read routing data from
+  `TrackingLinkVersion.snapshot` (D016) rather than re-joining Campaign/SocialAccount/
+  TelegramBot — that's the whole point of the snapshot.
 - Implement the three V1 path type executors: `direct`, `aggregator`, `telegram`.
 - Age gate UI (simple interstitial, cookie/session remembered per visitor for a TTL — TBD).
 - Load test / sanity check the hot path for latency (this is the one route real users hit
