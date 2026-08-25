@@ -550,3 +550,195 @@ log's summary nor any `Conversion.rawPayload` can ever contain one. Two regressi
 (a unit test on `parseCsv`, an integration test on `importPaybigCsv` with a NUL in an extra
 column of an otherwise-valid row); reproduced the original crash live in the browser before the
 fix and re-verified it resolved to a normal "invalid row" report after.
+
+---
+
+# Phase 1 to Production Pilot hardening (this milestone)
+
+Seven architectural questions were given final answers as the baseline for this milestone,
+before any code was touched -- recorded here as D043 because CLAUDE.md requires an entry for
+architecturally significant choices, and "keep the current behavior, permanently, as a
+considered decision" is exactly that, even where it meant writing nothing. D044 onward are the
+production-readiness improvements built on top of that baseline.
+
+## D043 -- Seven V1 architectural decisions ratified for the production pilot
+**Date:** 2026-08-26
+1. **Tracking link pause/archive blocks new clicks only.** Confirmed as the permanent behavior,
+   not a gap to close -- `/gate`/`/path`/`/out` will continue to read only the frozen per-click
+   snapshot, never re-checking `TrackingLink.status`. An emergency kill-switch that stops
+   in-flight visitors too is explicitly deferred to a future, separate mechanism if compliance
+   ever requires it -- not built here.
+2. **The 18+ gate stays a click-through acknowledgement, not identity verification.**
+   AdultPrime remains the authoritative age-verification system; FunnelCore's gate is
+   configurable per tracking link (as it already was) and will not grow date-of-birth capture,
+   geo-enforcement, or any other verification mechanic.
+3. **Attribution stays last-click, deterministic, for V1.** No first-touch or multi-touch
+   model. `Click` continues to be the sole attribution record per conversion-eligible visit.
+4. **RBAC stays single-role (`ADMIN`) for V1.** `AdminRole.VIEWER` remains in the schema,
+   unenforced and uncreatable (per the post-V1 audit's finding) -- deliberately not wired up
+   this milestone. The schema is already extensible for this; no schema change was needed to
+   satisfy "keep it extensible."
+5. **Paybig integration stays CSV import.** No live API/webhook integration until the business
+   confirms Paybig actually offers one -- `ApiConnection` remains an unused credential holder.
+6. **Campaign slugs become immutable after first publish.** The one item in this list that
+   *is* a new behavior -- see D049.
+7. **Click fraud is logged, never blocked.** No traffic-blocking logic was added. Reporting
+   exposure for suspicious-behavior signals is explicitly deferred ("later," per the brief) --
+   not attempted in this milestone; there is no fraud-signal collection to report on yet.
+
+## D044 -- DB-backed login lockout after repeated failures
+**Date:** 2026-08-26
+Closes the "no rate-limiting or lockout on login attempts" gap flagged in OPEN_QUESTIONS.md
+(distinct from D036, which stops *email enumeration* via timing -- this slows down guessing a
+*known* email's password). `AdminUser` gained `failedLoginAttempts`/`lockedUntil` columns
+rather than a new table or an in-memory counter -- DB-backed so it survives a restart and works
+correctly across multiple app instances, the same reasoning OPEN_QUESTIONS.md already gave for
+rejecting an in-memory approach. Five failures locks the account for 15 minutes
+(`lib/auth/login-rate-limit.ts`); a successful login clears both fields. The lockout check runs
+*before* the password comparison and skips bcrypt entirely when locked, which does not reopen
+D036's timing gap -- only an account an attacker already drove to 5 real failures can reach this
+state, so it reveals nothing about *unregistered* emails. Verified live: 5 wrong attempts
+against the seeded admin locked the account, and the 6th attempt with the *correct* password
+was still rejected.
+
+## D045 -- Security headers, and a nonce-based Content-Security-Policy via middleware
+**Date:** 2026-08-26
+Added `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, and
+`Strict-Transport-Security` as static headers in `next.config.ts`. CSP could not be static: a
+first attempt at a plain `script-src 'self'` header broke the app outright -- confirmed live via
+browser console errors and a failed hydration (`InvariantError: Expected a request ID to be
+defined`) -- because Next.js's own hydration bootstrap uses inline `<script>` tags that a static
+CSP has no way to allow without `'unsafe-inline'` (which defeats most of CSP's purpose).
+Next.js's documented fix is a per-request nonce generated in middleware, which it then
+automatically applies to its own inline scripts -- implemented in the new `src/middleware.ts`.
+This is the first `middleware.ts` in the project; introduced specifically because CSP requires
+it, not proactively. The nonce header and the static `next.config.ts` headers must never both
+carry `Content-Security-Policy` -- browsers enforce the *intersection* of multiple CSP headers,
+so a stray static one would silently re-break hydration by overriding the nonce. `'unsafe-eval'`
+is included only outside production (`NODE_ENV !== "production"`) -- React's dev mode uses
+`eval()` for debugging call-stack reconstruction and says so directly in its own console
+warning; production React never does. Re-verified live after the fix: login, an admin CRUD
+create action, and page rendering all worked with no CSP violations.
+
+## D046 -- Startup environment validation via `instrumentation.ts`
+**Date:** 2026-08-26
+`ENCRYPTION_KEY` was previously validated only lazily, the first time a secret was
+encrypted/decrypted (`lib/crypto.ts`'s `getKey()`) -- a misconfigured deployment would start
+successfully and serve traffic before failing on the first Telegram bot creation or webhook
+call. `src/lib/env-validation.ts` + `src/instrumentation.ts`'s `register()` hook (Next.js's
+standard "run once at server startup" mechanism, both `next dev` and `next start`) now checks
+`DATABASE_URL` and `ENCRYPTION_KEY` (including the exact-32-bytes-decoded check) before any
+request is served, and throws -- crashing the boot -- if either is missing or malformed.
+`lib/crypto.ts`'s own check is left in place as defense-in-depth, not replaced. `APP_BASE_URL`
+is a warning, not a hard failure, since Telegram-bot actions and the webhook handler already
+have a documented `http://localhost:3000` fallback for local dev. Verified live: corrupting
+`ENCRYPTION_KEY` to an invalid length made `next dev` fail to boot with a clear error naming
+the exact problem, rather than starting and failing later.
+
+## D047 -- `/api/health` returns 503 when the database is unreachable
+**Date:** 2026-08-26
+Previously always returned HTTP 200 regardless of database state, with only the JSON body's
+`database` field reflecting reality -- a monitor checking status codes alone (common for
+liveness/readiness probes) could never detect a DB outage through this endpoint. The DB check
+itself was extracted to `lib/health.ts`'s `checkDatabaseHealth`, framework-independent so it's
+directly unit-testable with a fake db object instead of needing to actually stop Postgres (the
+QA milestone's approach) for every future test run. Verified live against a real outage: 503
+with `{"status":"degraded","database":"unreachable"}` while Postgres was stopped, back to 200
+automatically once it was restarted -- no app restart needed.
+
+## D048 -- Conversion status (Confirmed/Reversed) updates via CSV re-import
+**Date:** 2026-08-26
+Closed a real, previously undocumented data-model gap the post-V1 audit found: `Conversion`
+had a `ConversionStatus` enum (`PENDING | CONFIRMED | REVERSED`) that nothing in the codebase
+ever set beyond the schema default, and no way existed to apply a chargeback/reversal Paybig
+might report later for an already-imported conversion. `lib/paybig-import.ts` gained an
+optional 6th CSV column, `status` (case-insensitive `pending`/`confirmed`/`reversed`) -- when a
+re-imported `conversion_id` already exists and its `status` column differs from what's stored,
+only that column is updated (a new `ImportSummary.statusUpdated` counter, separate from
+`duplicates`). Nothing else about an existing row -- amount, currency, campaign match -- is ever
+revisited by a re-import; this is deliberately not a general update path. An unrecognized
+status value fails the row as invalid (consistent with every other field's strict validation),
+rather than silently ignoring it -- a real but differently-spelled status from Paybig should
+surface as a visible import problem, not vanish. Row-by-row processing (D027) and the existing
+dedup-by-`conversion_id`/composite-key logic (D027) are unchanged; this only adds a second
+outcome (update) to what happens when a key is already seen. Verified live: importing a
+conversion, then re-importing the same `conversion_id` with `status=reversed`, updated the
+stored row's status and reported it as `statusUpdated: 1`, not `duplicates`.
+
+## D049 -- Campaign slugs are immutable once used in a published tracking link
+**Date:** 2026-08-26
+The one genuinely new behavior among this milestone's seven ratified architectural decisions
+(D043). Before this, editing a campaign's slug after publishing was allowed -- silently changing
+which Paybig lane future CSV rows referencing the old slug would (or wouldn't) match, without
+touching any already-published `TrackingLinkVersion` (whose snapshot is immutable regardless --
+see D016). `campaigns/actions.ts`'s `updateCampaign` now checks, before writing, whether any
+`TrackingLinkVersion` references the campaign; if the submitted slug differs from the stored
+one and such a version exists, the update is rejected with a message pointing at creating a new
+campaign instead. Every other field (name, Paybig URL, default flag) remains freely editable.
+The admin UI renders the slug as a disabled display field plus a hidden input carrying the
+locked value, so a normal edit can't even attempt the change -- but the server-side check is
+authoritative regardless, verified live by directly tampering with the hidden field's value via
+script and confirming the same rejection fires.
+
+## D050 -- Tracking link added as an attribution-dashboard filter dimension
+**Date:** 2026-08-26
+Closed a gap the post-V1 audit found against PRODUCT_SPEC.md's own success criteria, which
+names "brand/platform/**tracking link**" as reportable dimensions -- no tracking-link filter
+existed on `/admin/reports` even though `Click.trackingLinkId` was always available to filter
+on. Added to `ReportFilters`/`buildClickWhere` in `lib/attribution-report.ts` and to the
+reports page's filter form. Like path/social-account/experiment/experiment-arm, selecting a
+tracking link marks signup-rate metrics incompatible (`isSignupAttributionCompatible`) -- a
+campaign can span more than one tracking link, so a single link's click count isn't comparable
+to the campaign-wide signup count for the same reason D029 already established for the other
+four dimensions. This does not touch the campaign-level signup attribution limitation itself
+(explicitly not to be changed this milestone) -- it only extends which filters trigger the
+existing "not compatible" warning.
+
+## D051 -- Pagination and search added to the conversions list
+**Date:** 2026-08-26
+`/admin/conversions` was capped at the 50 most recent rows with no way to see older ones or
+find a specific conversion by id -- a real gap once a pilot accumulates more than 50 imported
+rows. Added `page`/`q` query params (GET form, same pattern as the reports page's filters -- no
+client JS needed), searching `paybigConversionId` via a case-insensitive `contains` match
+(the id an admin is actually handed when investigating a specific Paybig-reported issue;
+broader search wasn't added speculatively). Does not change the CSV import behavior itself
+(explicitly not to be touched this milestone) -- only how already-imported rows are browsed.
+
+## D052 -- Indexes added for `Click.brandId`, `platformId`, `socialAccountId`
+**Date:** 2026-08-26
+The post-V1 audit flagged that the attribution dashboard filters `Click` on brand, platform,
+and social account, none of which had a covering index (`Click` only had
+`[trackingLinkId, clickedAt]` and `[campaignId]`). Not urgent at current data volume, but cheap
+and additive, so added now rather than waiting for it to become a measured problem. Does not
+change any query's *results*, only how Postgres can execute them.
+
+## D053 -- Structured logging, request IDs, funnel timing, and error boundaries
+**Date:** 2026-08-26
+Before this milestone, the codebase had zero `console.*` calls in production code -- a
+deliberate, previously-audited positive (no accidental secret leakage) but also zero
+observability into what the running system was actually doing. `lib/logger.ts` adds one
+structured JSON-line-per-event helper (`logger.info/warn/error`), used only for
+non-secret fields (ids, counts, enums, durations, booleans -- the same discipline already
+applied to Telegram/audit logging, made explicit in the module's own docstring rather than
+relied on implicitly). `lib/request-context.ts`'s `getOrCreateRequestId` reuses an upstream
+`x-request-id` header or mints one; `src/middleware.ts` (already needed for D045's CSP nonce)
+now generates and propagates this once per incoming request rather than per log call, so every
+log line from one HTTP request shares the same id.
+
+Instrumented: `/l/[token]` and `/out/[clickId]` (funnel timing -- a duration on every resolution
+attempt, success or failure -- and failed-redirect logging via the existing `reason` values
+those routes already computed), the Telegram webhook route (outcome + duration, mirroring its
+existing `reason` values), the CSV import action (one structured summary line alongside the
+existing per-batch `AuditLog` entry -- "import summaries" without changing the import mechanism
+itself), and login (failed attempts and lockouts, by `adminUserId` -- never by email or
+password). Both `/l` and `/out` also gained a top-level `try`/`catch` around their existing
+logic as a safety net -- an unexpected failure (e.g. a database outage) now logs and returns the
+same generic "not available" response those routes already use for known failure reasons,
+instead of an unhandled framework crash. This does not add or change any decision logic in
+either route -- same four-segment structure (D018), same redirect targets on success.
+
+Added `src/app/error.tsx` (client-rendered error boundary for admin/gate/path pages) and
+`src/app/global-error.tsx` (Next.js's required fallback if the root layout itself throws) so an
+unexpected render error shows a plain "something went wrong" page instead of a raw framework
+crash screen -- the same class of problem D042's NUL-byte crash was, but as a general safety net
+rather than a fix for one specific input.

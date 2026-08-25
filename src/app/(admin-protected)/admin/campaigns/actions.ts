@@ -109,6 +109,26 @@ export async function updateCampaign(_prevState: FormState, formData: FormData):
     return { error: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
 
+  // Slugs become immutable once a campaign has been used in a published
+  // TrackingLinkVersion — changing it after the fact would let a CSV import
+  // silently start (or stop) matching a different, unrelated Paybig lane
+  // against clicks already attributed under the old slug. Everything else
+  // about the campaign (name, Paybig URL, default flag) can still change
+  // freely — only the identifier is locked. Create a new campaign instead.
+  const current = await prisma.campaign.findUniqueOrThrow({ where: { id } });
+  if (current.slug !== parsed.data.slug) {
+    const publishedVersion = await prisma.trackingLinkVersion.findFirst({
+      where: { campaignId: id },
+      select: { id: true },
+    });
+    if (publishedVersion) {
+      return {
+        error:
+          "This campaign's slug can't be changed after it has been used in a published tracking link. Create a new campaign instead.",
+      };
+    }
+  }
+
   try {
     await prisma.$transaction(async (tx) => {
       const before = await tx.campaign.findUniqueOrThrow({ where: { id } });

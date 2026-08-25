@@ -50,6 +50,8 @@ Backend administrators. No public self-signup.
 | passwordHash | String | argon2/bcrypt hash, never plaintext |
 | role | AdminRole | `ADMIN \| VIEWER` (see OPEN_QUESTIONS for full RBAC) |
 | isActive | Boolean | disables login without deleting history |
+| failedLoginAttempts | Int | consecutive failed logins since the last success; reset to 0 on success or on locking (see below). Distinct from D036's timing-safe comparison — this slows down guessing a *known* email's password, not enumeration. |
+| lockedUntil | DateTime? | set 15 minutes in the future once `failedLoginAttempts` reaches 5; login is rejected without a password check while this is in the future. See `lib/auth/login-rate-limit.ts`, DECISIONS.md D044. |
 | createdAt / updatedAt | DateTime | |
 
 ### Session
@@ -149,6 +151,13 @@ Unique on `(brandId, slug)`. At most one `ACTIVE` campaign per `(brandId, platfo
 `isDefault = true` — enforced at the application layer (setting a new default demotes any
 existing one in the same transaction; archiving a default campaign clears its flag), not as a
 DB constraint. See DECISIONS.md D011.
+
+`slug` becomes immutable once any `TrackingLinkVersion` has been published referencing this
+campaign — enforced at the application layer in `updateCampaign` (checked before the write,
+not as a DB constraint), with the UI additionally rendering the field as a disabled display
+input paired with a hidden input carrying the locked value, so the change can't even be
+attempted through a normal edit. Every other field remains freely editable at any time.
+Changing the slug after publish requires creating a new campaign instead. See DECISIONS.md D049.
 
 ### TelegramBot
 Telegram credentials are secrets and are encrypted at rest (see ARCHITECTURE.md §6).
@@ -307,6 +316,10 @@ resolved version at click time.
 | deviceType | String? | |
 | clickedAt | DateTime | |
 
+Indexed on `brandId`, `platformId`, and `socialAccountId` individually (in addition to the
+existing `(trackingLinkId, clickedAt)` and `campaignId` indexes) — the attribution dashboard
+filters on all three, and none had a covering index before this milestone. See DECISIONS.md D052.
+
 ### FunnelEvent
 Step-by-step record of a click's progression through the funnel. Written by
 `src/lib/public-routing.ts` and `src/lib/telegram-webhook.ts` — see ARCHITECTURE.md §4/§4a for
@@ -382,6 +395,14 @@ across *all* brands — since that column is only unique per brand, a slug match
 one brand's campaign is treated as unmatched/ambiguous rather than guessed (D028). An
 unmatched or ambiguous row still creates a `Conversion` with `clickId`/`campaignId`/`brandId`
 left null; the row is never dropped (CLAUDE.md rule 8).
+
+**Status updates via re-import:** the CSV may include an optional `status` column
+(case-insensitive `pending`/`confirmed`/`reversed`). When a re-imported row's `conversion_id`
+already exists and its `status` differs from what's stored, only the `status` column is
+updated — amount, currency, and campaign match are never revisited on a re-import. This is the
+one exception to "never touch an existing Conversion row on re-import"; it is scoped to that
+single column. An unrecognized status value fails the row as invalid, same as any other bad
+field. See DECISIONS.md D048.
 
 ## 3. Enums
 

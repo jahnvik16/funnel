@@ -12,10 +12,12 @@ export function EditCampaignForm({
   campaign,
   brands,
   platforms,
+  slugLocked,
 }: {
   campaign: Campaign;
   brands: Brand[];
   platforms: Platform[];
+  slugLocked: boolean;
 }) {
   const [state, formAction] = useActionState(updateCampaign, initialState);
 
@@ -50,8 +52,15 @@ export function EditCampaignForm({
           <input name="name" required defaultValue={campaign.name} className={ui.input} />
         </label>
         <label className={ui.label}>
-          Slug
-          <input name="slug" required defaultValue={campaign.slug} className={ui.input} />
+          Slug{slugLocked ? " (fixed — used in a published tracking link)" : ""}
+          {slugLocked ? (
+            <>
+              <input type="hidden" name="slug" value={campaign.slug} />
+              <input value={campaign.slug} disabled className={`${ui.input} opacity-60`} />
+            </>
+          ) : (
+            <input name="slug" required defaultValue={campaign.slug} className={ui.input} />
+          )}
         </label>
         <label className={ui.label}>
           Paybig URL

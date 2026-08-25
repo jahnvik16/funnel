@@ -210,6 +210,7 @@ function validated(overrides: Partial<ValidatedPaybigRow> = {}): ValidatedPaybig
     campaignSlug: "spring-push",
     amount: "19.99",
     currency: "USD",
+    status: null,
     raw: {},
     ...overrides,
   };
@@ -400,4 +401,119 @@ test("importPaybigCsv does not crash on a NUL byte embedded in an extra column",
   assert.equal(summary.invalid.length, 0);
   const row = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
   assert.equal(row.campaignId, campaign.id);
+});
+
+// ---------------------------------------------------------------------------
+// Conversion status (Confirmed / Reversed) support
+// ---------------------------------------------------------------------------
+
+test("validatePaybigRow accepts an optional status column, case-insensitively", () => {
+  const confirmed = validatePaybigRow({ ...validRow, status: "Confirmed" });
+  assert.equal(confirmed.ok, true);
+  if (confirmed.ok) assert.equal(confirmed.data.status, "CONFIRMED");
+
+  const reversed = validatePaybigRow({ ...validRow, status: "reversed" });
+  assert.equal(reversed.ok, true);
+  if (reversed.ok) assert.equal(reversed.data.status, "REVERSED");
+});
+
+test("validatePaybigRow treats a missing or blank status column as no status change", () => {
+  const missing = validatePaybigRow(validRow);
+  assert.equal(missing.ok, true);
+  if (missing.ok) assert.equal(missing.data.status, null);
+
+  const blank = validatePaybigRow({ ...validRow, status: "" });
+  assert.equal(blank.ok, true);
+  if (blank.ok) assert.equal(blank.data.status, null);
+});
+
+test("validatePaybigRow rejects an unrecognized status value", () => {
+  const result = validatePaybigRow({ ...validRow, status: "refunded" });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /status/);
+});
+
+test("importPaybigCsv creates a new conversion with the given status", async () => {
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const campaign = await makeCampaign(brand.id, platform.id);
+  const id = unique("conv-status");
+  cleanup.push(() => deleteConversions([id]));
+
+  const csv =
+    "conversion_id,conversion_time,campaign_slug,amount,currency,status\n" +
+    `${id},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD,confirmed\n`;
+
+  const summary = await importPaybigCsv(prisma, csv);
+  assert.equal(summary.created, 1);
+  assert.equal(summary.statusUpdated, 0);
+
+  const row = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
+  assert.equal(row.status, "CONFIRMED");
+});
+
+test("importPaybigCsv updates an existing conversion's status on re-import when it differs, without touching anything else", async () => {
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const campaign = await makeCampaign(brand.id, platform.id);
+  const id = unique("conv-reversal");
+  cleanup.push(() => deleteConversions([id]));
+
+  const original =
+    "conversion_id,conversion_time,campaign_slug,amount,currency\n" +
+    `${id},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD\n`;
+  const firstSummary = await importPaybigCsv(prisma, original);
+  assert.equal(firstSummary.created, 1);
+
+  const before = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
+  assert.equal(before.status, "PENDING");
+
+  const reversal =
+    "conversion_id,conversion_time,campaign_slug,amount,currency,status\n" +
+    `${id},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD,reversed\n`;
+  const secondSummary = await importPaybigCsv(prisma, reversal);
+  assert.equal(secondSummary.created, 0);
+  assert.equal(secondSummary.duplicates, 0);
+  assert.equal(secondSummary.statusUpdated, 1);
+
+  const after = await prisma.conversion.findUniqueOrThrow({ where: { paybigConversionId: id } });
+  assert.equal(after.status, "REVERSED");
+  // Nothing else about the row changed.
+  assert.equal(after.amount?.toString(), before.amount?.toString());
+  assert.equal(after.campaignId, before.campaignId);
+});
+
+test("importPaybigCsv counts a re-import with the same status as a plain duplicate, not a status update", async () => {
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const campaign = await makeCampaign(brand.id, platform.id);
+  const id = unique("conv-samestatus");
+  cleanup.push(() => deleteConversions([id]));
+
+  const csv =
+    "conversion_id,conversion_time,campaign_slug,amount,currency,status\n" +
+    `${id},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD,confirmed\n`;
+
+  await importPaybigCsv(prisma, csv);
+  const secondSummary = await importPaybigCsv(prisma, csv);
+
+  assert.equal(secondSummary.created, 0);
+  assert.equal(secondSummary.statusUpdated, 0);
+  assert.equal(secondSummary.duplicates, 1);
+});
+
+test("importPaybigCsv reports a row with an unrecognized status as invalid, not silently ignored", async () => {
+  const brand = await makeBrand();
+  const platform = await makePlatform();
+  const campaign = await makeCampaign(brand.id, platform.id);
+
+  const csv =
+    "conversion_id,conversion_time,campaign_slug,amount,currency,status\n" +
+    `${unique("conv-badstatus")},2026-08-01T12:00:00Z,${campaign.slug},19.99,USD,refunded\n`;
+
+  const summary = await importPaybigCsv(prisma, csv);
+  assert.equal(summary.created, 0);
+  assert.equal(summary.invalid.length, 1);
+  assert.match(summary.invalid[0].reason, /status/);
 });

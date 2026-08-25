@@ -5,9 +5,16 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
 
 ## Paybig integration — V1 shipped as CSV import; what remains open
 - **Resolved for V1**: the conversion notification is an admin-uploaded CSV
-  (`campaign_slug`, `conversion_time`, `amount`, `currency`, optionally `conversion_id`) — not
-  a webhook, polling API, or redirect-time postback. `lib/paybig-import.ts` +
-  `/admin/conversions`; see DECISIONS.md D027.
+  (`campaign_slug`, `conversion_time`, `amount`, `currency`, optionally `conversion_id`,
+  optionally `status`) — not a webhook, polling API, or redirect-time postback.
+  `lib/paybig-import.ts` + `/admin/conversions`; see DECISIONS.md D027, D048. **Reaffirmed
+  (D043.5)**: this stays CSV-only until the business confirms Paybig actually offers a live
+  API/webhook integration — `ApiConnection` remains an unused credential holder for now.
+- **Resolved this milestone (D048)**: an optional `status` column
+  (`pending`/`confirmed`/`reversed`) lets a re-imported row update an existing conversion's
+  status — the previously-flagged gap where `ConversionStatus` existed in the schema but
+  nothing ever set it beyond the default is closed. Only the `status` column is ever revisited
+  on a re-import; amount/currency/campaign match are not.
 - **Resolved for V1**: the join key Paybig round-trips is `campaign_slug` only — no click-id/
   sub-id. Attribution is therefore at the `Campaign` level, the coarser of the two options this
   file previously posed: a conversion can be tied to a campaign+time window, never to one
@@ -60,17 +67,19 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   BotFather). A stale `botUsername` would only surface as a broken deep link at click time.
 
 ## Age gate
-- Is 18+ confirmation just a click-through interstitial (no real verification), or does
-  compliance require something stronger (date-of-birth capture, geo-based enforcement)?
-  Current schema (`ageGateEnabled Boolean` + generic `pathConfig`) assumes click-through only.
+- **Resolved for V1 (D043.2)**: the 18+ gate stays a click-through acknowledgement, not identity
+  verification. AdultPrime remains authoritative; the gate stays configurable per tracking link
+  as it already was, and will not grow date-of-birth capture or geo-enforcement.
 - Should a passed gate be remembered (cookie/session) so repeat visitors from the same link
-  don't see it again, and if so for how long?
+  don't see it again, and if so for how long? Still open — not addressed by D043.
 
 ## Attribution edge cases
-- Multi-touch: if a visitor clicks two different tracking links before converting, which one
-  gets credit? Current model is last-click-per-Click-row; no multi-touch model designed yet.
-- Click fraud / bot traffic filtering — not addressed in V1 schema at all. Needs a decision
-  on whether to filter at ingestion or flag-and-report.
+- **Resolved for V1 (D043.3)**: attribution stays last-click, deterministic. No first-touch or
+  multi-touch model will be built for V1.
+- **Resolved for V1 (D043.7)**: click fraud / bot traffic is logged, never blocked. No
+  traffic-blocking logic exists or is planned for V1. Reporting exposure for suspicious-behavior
+  signals is deferred to a later milestone — there is no fraud-signal collection yet, so there is
+  nothing to report on today.
 - IP hashing scheme and retention period for raw IP (currently: `lib/public-routing.ts`'s
   `hashIp` does an unsalted SHA-256 of the raw IP before it ever touches storage — satisfies
   "hash before storage, no raw IP retention" but has no salt/rotation policy; a determined
@@ -88,35 +97,35 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
   decision that affects attribution correctness), spoofing it doesn't corrupt anything that
   currently matters — but it's part of the same unresolved "click fraud / bot traffic
   filtering" gap immediately above, not a new, separate problem.
-- **Audited, not fixed**: pausing or archiving a `TrackingLink` only blocks *new* clicks
-  (`resolveTrackingLinkVersion` checks `link.status` at `/l/[token]`) — a visitor who already
-  has a `clickId` mid-funnel can still complete `/gate` → `/path` → `/out` after the link is
-  paused or archived, since none of those three routes re-check the link's current status
-  (they only ever read the *frozen* snapshot, by design — see D016). Whether that's correct
-  depends on *why* an admin is pausing: "stop new traffic" vs. "stop everything immediately,
-  including in-flight visitors" are both reasonable intents, and CLAUDE.md doesn't specify
-  which V1 should be. Left unchanged rather than guessed at — a product decision, not a bug.
+- **Resolved (D043.1)**: pausing or archiving a `TrackingLink` blocking only *new* clicks
+  (`resolveTrackingLinkVersion` checks `link.status` at `/l/[token]`) is confirmed as the
+  permanent, intended behavior, not a gap — a visitor who already has a `clickId` mid-funnel
+  will continue to complete `/gate` → `/path` → `/out` off the frozen snapshot (D016), and none
+  of those three routes will be changed to re-check the link's live status. An emergency
+  kill-switch that also stops in-flight visitors is explicitly deferred to a future, separate
+  mechanism if compliance ever requires it — not built in this milestone.
 
 ## Auth / RBAC
-- V1 schema has `AdminRole: ADMIN | VIEWER`. Is that sufficient, or do specific brands need
-  scoped access (an admin who can only manage Brand X)? Not modeled yet — would need a
-  join table (`AdminUser` ↔ `Brand` with role) if required.
-- **Audited, not fixed**: `AdminRole.VIEWER` is not enforced anywhere — every Server Action
-  that mutates data calls `requireAdmin()`, which only checks "is logged in," never "is this
-  account actually an ADMIN." A VIEWER account could perform every mutation an ADMIN can.
-  Not fixed in the hardening milestone because there is currently no way to create a VIEWER
-  account at all (no admin-user-management UI exists; the only `AdminUser.create` call in the
-  codebase is the seed script, which always assigns ADMIN) — the gap exists in the code but has
-  no live exploitation path today. If admin-user management is ever built, wiring real
-  role checks into every mutating action must happen in the same change, not after.
+- **Resolved for V1 (D043.4)**: RBAC stays single-role (`ADMIN`) for V1 — no Viewer/Manager
+  permission model this milestone. The schema (`AdminRole: ADMIN | VIEWER`) is already
+  extensible for this; if specific brands ever need scoped access (an admin who can only manage
+  Brand X), that would still need a new join table (`AdminUser` ↔ `Brand` with role) — not
+  modeled, and out of scope until RBAC itself is revisited.
+- **Still open, unchanged by this milestone**: `AdminRole.VIEWER` is not enforced anywhere —
+  every Server Action that mutates data calls `requireAdmin()`, which only checks "is logged
+  in," never "is this account actually an ADMIN." A VIEWER account could perform every mutation
+  an ADMIN can. Not fixed because there is currently no way to create a VIEWER account at all
+  (no admin-user-management UI exists; the only `AdminUser.create` call in the codebase is the
+  seed script, which always assigns ADMIN) — the gap exists in the code but has no live
+  exploitation path today. If admin-user management is ever built, wiring real role checks into
+  every mutating action must happen in the same change, not after.
 - SSO requirement? Currently assumes email/password with a hashed credential in Postgres.
-- **Audited, not fixed**: no rate-limiting or lockout on login attempts — a brute-force risk
-  against the admin password, distinct from the timing side-channel closed in DECISIONS.md D036
-  (D036 stops an attacker from learning *which emails exist*; it does nothing to slow down
-  guessing a known email's password). Deliberately not built here: a correct implementation
-  needs a persistent, shared counter (an in-memory one would reset on every server restart and
-  wouldn't work at all across multiple instances) — real new infrastructure, not a hardening
-  tweak, and out of scope per this milestone's "do not introduce unnecessary architecture."
+- **Resolved this milestone (D044)**: login now has DB-backed rate limiting/lockout —
+  `AdminUser.failedLoginAttempts`/`lockedUntil`, 5 failures locks the account for 15 minutes.
+  Chosen DB-backed (not in-memory) specifically so it survives a restart and works correctly
+  across multiple app instances. Distinct from the timing side-channel closed in DECISIONS.md
+  D036 (D036 stops an attacker from learning *which emails exist*; D044 slows down guessing a
+  known email's password).
 
 ## Domains
 - Is a `Domain` row expected to correspond to real DNS + TLS provisioning that FunnelCore
@@ -157,6 +166,16 @@ deliberate product decision) before or during the phase noted. Not blocking Phas
 - The dashboard's date-range filter has no default bound (an all-time query if left blank) —
   fine at current data volumes, worth revisiting once there's enough `Click`/`Conversion`
   history for that to matter.
+- **Resolved this milestone (D050)**: tracking link is now a filter dimension on
+  `/admin/reports`, closing the gap against PRODUCT_SPEC.md's own reportable-dimensions list.
+  Selecting one marks signup-rate metrics incompatible, same reasoning D029 already established
+  for path/social-account/experiment/experiment-arm (a campaign can span more than one tracking
+  link).
+- **Resolved this milestone (D051)**: `/admin/conversions` now supports pagination and search
+  by `paybigConversionId`, closing the "capped at 50 rows, no way to see older ones" gap.
+- **Resolved this milestone (D052)**: `Click.brandId`/`platformId`/`socialAccountId` now have
+  covering indexes, closing the previously-flagged missing-index gap for these dashboard filter
+  columns.
 
 ## Production hardening audit — reviewed, deliberately left as-is
 Findings from this milestone's full audit against CLAUDE.md that were reviewed and judged

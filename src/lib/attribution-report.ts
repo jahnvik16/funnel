@@ -10,6 +10,7 @@ export type ReportFilters = {
   brandId?: string;
   platformId?: string;
   campaignId?: string;
+  trackingLinkId?: string;
   pathType?: PathType;
   socialAccountId?: string;
   experimentId?: string;
@@ -17,16 +18,23 @@ export type ReportFilters = {
 };
 
 // Click/FunnelEvent carry real click-level attribution (brand, platform,
-// social account, campaign, path type via the resolved version, experiment
-// arm). Conversion (from a Paybig CSV keyed only on campaign_slug) carries
-// none of that — it only ever joins to Campaign/Brand. A filter on path,
-// social account, experiment, or experiment arm therefore narrows the click
-// side of the report to a subset that Conversion data cannot be sliced to
-// match, so any metric that divides a campaign-wide signup count by that
-// narrowed click count would compare mismatched populations. See
-// DECISIONS.md D029.
+// social account, campaign, tracking link, path type via the resolved
+// version, experiment arm). Conversion (from a Paybig CSV keyed only on
+// campaign_slug) carries none of that — it only ever joins to
+// Campaign/Brand. A filter on tracking link, path, social account,
+// experiment, or experiment arm therefore narrows the click side of the
+// report to a subset that Conversion data cannot be sliced to match (a
+// campaign can span more than one tracking link), so any metric that
+// divides a campaign-wide signup count by that narrowed click count would
+// compare mismatched populations. See DECISIONS.md D029.
 function isSignupAttributionCompatible(filters: ReportFilters): boolean {
-  return !filters.pathType && !filters.socialAccountId && !filters.experimentId && !filters.experimentArmId;
+  return (
+    !filters.trackingLinkId &&
+    !filters.pathType &&
+    !filters.socialAccountId &&
+    !filters.experimentId &&
+    !filters.experimentArmId
+  );
 }
 
 function buildClickWhere(filters: ReportFilters): Prisma.ClickWhereInput {
@@ -41,6 +49,7 @@ function buildClickWhere(filters: ReportFilters): Prisma.ClickWhereInput {
   if (filters.brandId) where.brandId = filters.brandId;
   if (filters.platformId) where.platformId = filters.platformId;
   if (filters.campaignId) where.campaignId = filters.campaignId;
+  if (filters.trackingLinkId) where.trackingLinkId = filters.trackingLinkId;
   if (filters.socialAccountId) where.socialAccountId = filters.socialAccountId;
 
   if (filters.pathType || filters.experimentId || filters.experimentArmId) {

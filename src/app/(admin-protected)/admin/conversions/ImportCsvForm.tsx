@@ -18,7 +18,10 @@ export function ImportCsvForm() {
           Required columns: conversion_time, campaign_slug, amount, currency. conversion_id is
           strongly recommended — without it, duplicate detection falls back to a composite key
           (campaign + time + amount + currency) that cannot distinguish two genuinely distinct
-          conversions sharing all four values. Extra columns are preserved but ignored.
+          conversions sharing all four values. An optional status column (pending, confirmed, or
+          reversed) updates an existing conversion&apos;s status when it&apos;s re-imported with a
+          different value — nothing else about it is ever changed. Extra columns are preserved but
+          ignored.
         </p>
         <label className={ui.label}>
           CSV file
@@ -44,6 +47,7 @@ function ImportSummaryReport({ summary }: { summary: NonNullable<ImportFormState
           { label: "Total rows", value: summary.totalRows },
           { label: "Created", value: summary.created },
           { label: "Duplicates skipped", value: summary.duplicates },
+          { label: "Status updated", value: summary.statusUpdated },
           { label: "Matched to a campaign", value: summary.matchedCampaigns },
           { label: "Unmatched", value: summary.unmatched.length },
           { label: "Invalid rows", value: summary.invalid.length },

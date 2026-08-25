@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, ConversionStatus } from "@prisma/client";
 
 // Framework-independent (no next/headers) so it's directly testable — same
 // split as lib/tracking-link-publishing.ts and lib/public-routing.ts.
@@ -92,6 +92,13 @@ export type ValidatedPaybigRow = {
   campaignSlug: string;
   amount: string;
   currency: string;
+  // Optional 6th column, absent from the milestone's original minimum-field
+  // spec — null means "no status column, or blank", which leaves an
+  // existing Conversion's status untouched on a repeated import and lets a
+  // new Conversion take the schema's PENDING default, exactly the pre-
+  // existing behavior. Only a present, non-blank value can ever change
+  // anything.
+  status: ConversionStatus | null;
   raw: CsvRow;
 };
 
@@ -101,10 +108,17 @@ export type RowValidationResult =
 
 const AMOUNT_PATTERN = /^-?\d+(\.\d+)?$/;
 const CURRENCY_PATTERN = /^[A-Za-z]{3}$/;
+const STATUS_BY_LOWERCASE: Record<string, ConversionStatus> = {
+  pending: "PENDING",
+  confirmed: "CONFIRMED",
+  reversed: "REVERSED",
+};
 
-// The five minimum fields from the milestone brief. conversion_id is the only
-// one that's optional at the row level — see computeStorageKey for what
-// happens when it's missing.
+// The five minimum fields from the milestone brief, plus an optional 6th
+// (`status`) added for the production-hardening milestone's conversion
+// reversal/confirmation support. conversion_id and status are the only
+// fields optional at the row level — see computeStorageKey for what happens
+// when conversion_id is missing.
 export function validatePaybigRow(row: CsvRow): RowValidationResult {
   const campaignSlug = row.campaign_slug?.trim();
   if (!campaignSlug) return { ok: false, reason: "Missing campaign_slug." };
@@ -129,6 +143,16 @@ export function validatePaybigRow(row: CsvRow): RowValidationResult {
 
   const conversionIdRaw = row.conversion_id?.trim();
 
+  const statusRaw = row.status?.trim();
+  let status: ConversionStatus | null = null;
+  if (statusRaw) {
+    const mapped = STATUS_BY_LOWERCASE[statusRaw.toLowerCase()];
+    if (!mapped) {
+      return { ok: false, reason: `Invalid status: "${statusRaw}" (expected pending, confirmed, or reversed).` };
+    }
+    status = mapped;
+  }
+
   return {
     ok: true,
     data: {
@@ -137,6 +161,7 @@ export function validatePaybigRow(row: CsvRow): RowValidationResult {
       campaignSlug,
       amount: amountRaw,
       currency: currencyRaw.toUpperCase(),
+      status,
       raw: row,
     },
   };
@@ -194,6 +219,12 @@ export type ImportSummary = {
   totalRows: number;
   created: number;
   duplicates: number;
+  // A repeated conversion_id whose `status` column differs from what's
+  // already stored updates just that column (Confirmed/Reversed support) —
+  // counted separately from `duplicates`, which is now specifically "seen
+  // again with nothing new to apply." Nothing else about an existing
+  // Conversion is ever touched by a re-import.
+  statusUpdated: number;
   matchedCampaigns: number;
   invalid: InvalidRow[];
   unmatched: UnmatchedRow[];
@@ -213,6 +244,7 @@ export async function importPaybigCsv(db: Db, csvContent: string): Promise<Impor
     totalRows: rows.length,
     created: 0,
     duplicates: 0,
+    statusUpdated: 0,
     matchedCampaigns: 0,
     invalid: [],
     unmatched: [],
@@ -229,7 +261,19 @@ export async function importPaybigCsv(db: Db, csvContent: string): Promise<Impor
     const { key } = computeStorageKey(validated.data);
     const existing = await db.conversion.findUnique({ where: { paybigConversionId: key } });
     if (existing) {
-      summary.duplicates++;
+      // Confirmed/Reversed support: a repeated conversion_id with a `status`
+      // column that differs from what's stored updates just that column.
+      // Nothing else about the row (amount, currency, campaign match) is
+      // ever revisited on a re-import — this is not a general update path.
+      if (validated.data.status && validated.data.status !== existing.status) {
+        await db.conversion.update({
+          where: { id: existing.id },
+          data: { status: validated.data.status },
+        });
+        summary.statusUpdated++;
+      } else {
+        summary.duplicates++;
+      }
       continue;
     }
 
@@ -257,6 +301,7 @@ export async function importPaybigCsv(db: Db, csvContent: string): Promise<Impor
           amount: validated.data.amount,
           currency: validated.data.currency,
           occurredAt: validated.data.occurredAt,
+          status: validated.data.status ?? undefined,
           rawPayload: validated.data.raw,
         },
       });

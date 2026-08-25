@@ -91,6 +91,12 @@ model AdminUser {
   passwordHash String
   role         AdminRole @default(ADMIN)
   isActive     Boolean  @default(true)
+  // Login lockout (see lib/auth/login-rate-limit.ts). Reset to 0/null on any
+  // successful login. Independent of the timing-safe dummy-hash comparison
+  // (DECISIONS.md D036) — that stops email enumeration, this slows down
+  // guessing a known email's password.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -434,6 +440,13 @@ model Click {
 
   @@index([trackingLinkId, clickedAt])
   @@index([campaignId])
+  // Added for production reporting-query performance — the attribution
+  // dashboard filters on all three, and Click has no index covering them
+  // beyond trackingLinkId/campaignId (flagged in the post-V1 engineering
+  // audit as a real, if not-yet-urgent, scaling gap).
+  @@index([brandId])
+  @@index([platformId])
+  @@index([socialAccountId])
   @@map("clicks")
 }
 

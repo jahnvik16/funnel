@@ -1,11 +1,14 @@
 "use server";
 
 import { randomUUID } from "crypto";
+import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/guard";
 import { writeAuditLog } from "@/lib/audit";
 import { importPaybigCsv, type ImportSummary } from "@/lib/paybig-import";
+import { logger } from "@/lib/logger";
+import { getOrCreateRequestId } from "@/lib/request-context";
 
 export type ImportFormState = { error?: string; summary?: ImportSummary };
 
@@ -29,17 +32,34 @@ export async function importConversionsCsv(
     return { error: `File is too large (${Math.round(file.size / 1024 / 1024)} MB) — the limit is 10 MB.` };
   }
 
+  const requestId = getOrCreateRequestId(await headers());
   const content = await file.text();
   const summary = await importPaybigCsv(prisma, content);
 
   // One audit row per import batch, not per Conversion row — the row-level
   // detail (invalid/unmatched reasons) lives in the returned summary itself.
+  const entityId = randomUUID();
   await writeAuditLog(prisma, {
     actorId: admin.id,
     action: "IMPORT",
     entityType: "ConversionImport",
-    entityId: randomUUID(),
+    entityId,
     after: summary,
+  });
+
+  // Structured log line with the same counts, so the summary is visible in
+  // server logs/log-based alerting without opening the admin UI.
+  logger.info("paybig_import_completed", {
+    requestId,
+    importId: entityId,
+    adminUserId: admin.id,
+    totalRows: summary.totalRows,
+    created: summary.created,
+    duplicates: summary.duplicates,
+    statusUpdated: summary.statusUpdated,
+    matchedCampaigns: summary.matchedCampaigns,
+    invalidCount: summary.invalid.length,
+    unmatchedCount: summary.unmatched.length,
   });
 
   revalidatePath("/admin/conversions");

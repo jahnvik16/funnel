@@ -199,6 +199,41 @@ publishing link's brand (replacing the old, now-removed `experiment.trackingLink
   pattern doesn't reach into (route/action files are exercised manually, not unit tested — see
   `lib/` vs. `app/` throughout this document).
 
+### Production hardening (this milestone) — see DECISIONS.md D044–D053 for full rationale
+- `src/lib/auth/login-rate-limit.test.ts` (real Postgres): `isLockedOut` against `null`,
+  future, and past `lockedUntil` relative to an injected `now`; `recordFailedLogin` increments
+  below the threshold and locks (resetting the counter) exactly at `MAX_FAILED_LOGIN_ATTEMPTS`;
+  `recordSuccessfulLogin` clears both fields.
+- `src/lib/health.test.ts` (pure unit, fake `QueryableDb`): `checkDatabaseHealth` returns
+  `"connected"` when the query succeeds and `"unreachable"` — without rethrowing — when it
+  throws.
+- `src/lib/env-validation.test.ts` (pure unit): a fully valid env passes; a missing
+  `DATABASE_URL` or `ENCRYPTION_KEY` throws, naming both when both are missing; an
+  `ENCRYPTION_KEY` that doesn't decode to exactly 32 bytes throws; a missing `APP_BASE_URL`
+  does not throw (soft requirement, warns only).
+- `src/lib/request-context.test.ts` (pure unit): `getOrCreateRequestId` reuses an existing
+  upstream `x-request-id` header verbatim, and mints a fresh, distinct id on each call when one
+  isn't present.
+- `src/lib/paybig-import.test.ts` gained coverage for the optional `status` column (D048):
+  accepted case-insensitively; missing/blank leaves an existing row's status untouched; an
+  unrecognized value is rejected as invalid (both for a new row and for a re-imported existing
+  `conversion_id`); a differing status on re-import updates the existing row and increments
+  `ImportSummary.statusUpdated` rather than `duplicates`; a same-status re-import still counts
+  as a duplicate.
+- `src/lib/attribution-report.test.ts` gained a `trackingLinkId` filter test (D050): filtering
+  by one of two tracking links isolates that link's click and reports
+  `compatible: false`/`signupRatePerClick: null`, mirroring the existing path/social-account/
+  experiment/experiment-arm cases.
+- Not unit tested, verified live instead: the CSP nonce (D045; verified via curl showing the
+  nonce header present, and via browser — login, an admin CRUD create action, and page
+  rendering all worked with no CSP violations), the `instrumentation.ts` startup crash on a
+  malformed `ENCRYPTION_KEY` (D046; verified by deliberately corrupting the key and observing
+  `next dev` fail to boot with the exact error), `/api/health` returning 503 against a real
+  Postgres outage (D047; verified via `docker stop`/`start funnelcore-postgres`), campaign-slug
+  immutability including a direct hidden-field-tampering attempt (D049; verified live that the
+  server-side check still rejects the change), and the structured log lines themselves for
+  login/import/routing events (D053; verified via `grep` against the dev server's log output).
+
 ### End-to-end / manual (per UI change, per the project's UI-testing rule in CLAUDE.md)
 - Admin: create a Brand → Platform → SocialAccount → Domain → Campaign → TrackingLink →
   publish → confirm it appears correctly in list/detail views.

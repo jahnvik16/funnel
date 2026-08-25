@@ -9,6 +9,7 @@ type SearchParams = {
   brandId?: string;
   platformId?: string;
   campaignId?: string;
+  trackingLinkId?: string;
   pathType?: string;
   socialAccountId?: string;
   experimentId?: string;
@@ -24,6 +25,7 @@ function parseFilters(params: SearchParams): ReportFilters {
   if (params.brandId) filters.brandId = params.brandId;
   if (params.platformId) filters.platformId = params.platformId;
   if (params.campaignId) filters.campaignId = params.campaignId;
+  if (params.trackingLinkId) filters.trackingLinkId = params.trackingLinkId;
   if (params.pathType && PATH_TYPES.includes(params.pathType as PathType)) {
     filters.pathType = params.pathType as PathType;
   }
@@ -41,17 +43,20 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const params = await searchParams;
   const filters = parseFilters(params);
 
-  const [brands, platforms, campaigns, socialAccounts, experiments, experimentArms, report] = await Promise.all([
-    prisma.brand.findMany({ orderBy: { name: "asc" } }),
-    prisma.platform.findMany({ orderBy: { name: "asc" } }),
-    prisma.campaign.findMany({ orderBy: { name: "asc" }, include: { brand: true } }),
-    prisma.socialAccount.findMany({ orderBy: { handle: "asc" }, include: { brand: true } }),
-    prisma.experiment.findMany({ orderBy: { name: "asc" } }),
-    prisma.experimentArm.findMany({ orderBy: { name: "asc" }, include: { experiment: true } }),
-    buildAttributionReport(prisma, filters),
-  ]);
+  const [brands, platforms, campaigns, trackingLinks, socialAccounts, experiments, experimentArms, report] =
+    await Promise.all([
+      prisma.brand.findMany({ orderBy: { name: "asc" } }),
+      prisma.platform.findMany({ orderBy: { name: "asc" } }),
+      prisma.campaign.findMany({ orderBy: { name: "asc" }, include: { brand: true } }),
+      prisma.trackingLink.findMany({ orderBy: { label: "asc" }, include: { brand: true } }),
+      prisma.socialAccount.findMany({ orderBy: { handle: "asc" }, include: { brand: true } }),
+      prisma.experiment.findMany({ orderBy: { name: "asc" } }),
+      prisma.experimentArm.findMany({ orderBy: { name: "asc" }, include: { experiment: true } }),
+      buildAttributionReport(prisma, filters),
+    ]);
 
   const incompatibleReasons: string[] = [];
+  if (filters.trackingLinkId) incompatibleReasons.push("tracking link");
   if (filters.pathType) incompatibleReasons.push("path");
   if (filters.socialAccountId) incompatibleReasons.push("social account");
   if (filters.experimentId) incompatibleReasons.push("experiment");
@@ -103,6 +108,17 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
                 <option key={campaign.id} value={campaign.id}>
                   {campaign.brand.name} — {campaign.name}
                   {campaign.isDefault ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={ui.label}>
+            Tracking link
+            <select name="trackingLinkId" defaultValue={params.trackingLinkId ?? ""} className={ui.select}>
+              <option value="">All tracking links</option>
+              {trackingLinks.map((link) => (
+                <option key={link.id} value={link.id}>
+                  {link.brand.name} — {link.label} ({link.token})
                 </option>
               ))}
             </select>

@@ -340,6 +340,21 @@ test("buildAttributionReport: click/funnel metrics respect filter granularity; s
   assert.equal(byBrandPlatform.signupAttribution.compatible, true);
   assert.equal(byBrandPlatform.signupAttribution.signups, 1);
 
+  // --- Tracking link filter isolates click 1 only, and (like path/social
+  // account/experiment) breaks signup-rate compatibility: a campaign can
+  // span more than one tracking link, so a single-link click count isn't
+  // comparable to the campaign-wide signup count.
+  const byTrackingLink = await buildAttributionReport(prisma, { trackingLinkId: directLink.id });
+  assert.equal(byTrackingLink.funnel.clicks, 1);
+  assert.equal(byTrackingLink.funnel.ageGateAccepts, 1);
+  assert.equal(byTrackingLink.funnel.aggregatorViews, 0);
+  assert.equal(byTrackingLink.signupAttribution.compatible, false);
+  assert.equal(byTrackingLink.signupAttribution.signupRatePerClick, null);
+
+  const byOtherTrackingLink = await buildAttributionReport(prisma, { trackingLinkId: aggregatorLink.id });
+  assert.equal(byOtherTrackingLink.funnel.clicks, 1);
+  assert.equal(byOtherTrackingLink.funnel.aggregatorViews, 1);
+
   // --- Default/catch-all conversions counted separately from the named campaign ---
   const defaultReport = await buildAttributionReport(prisma, { campaignId: defaultCampaign.id });
   assert.equal(defaultReport.signupAttribution.signups, 1);

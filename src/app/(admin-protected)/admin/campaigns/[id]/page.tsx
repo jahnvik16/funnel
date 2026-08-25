@@ -6,10 +6,11 @@ import { EditCampaignForm } from "./EditCampaignForm";
 
 export default async function EditCampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const [campaign, brands, platforms] = await Promise.all([
+  const [campaign, brands, platforms, publishedVersion] = await Promise.all([
     prisma.campaign.findUnique({ where: { id } }),
     prisma.brand.findMany({ orderBy: { name: "asc" } }),
     prisma.platform.findMany({ orderBy: { name: "asc" } }),
+    prisma.trackingLinkVersion.findFirst({ where: { campaignId: id }, select: { id: true } }),
   ]);
   if (!campaign) notFound();
 
@@ -21,7 +22,12 @@ export default async function EditCampaignPage({ params }: { params: Promise<{ i
         </Link>
       </div>
       <h1 className={ui.pageTitle}>{campaign.name}</h1>
-      <EditCampaignForm campaign={campaign} brands={brands} platforms={platforms} />
+      <EditCampaignForm
+        campaign={campaign}
+        brands={brands}
+        platforms={platforms}
+        slugLocked={publishedVersion !== null}
+      />
     </div>
   );
 }
