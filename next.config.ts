@@ -3,8 +3,8 @@ import type { NextConfig } from "next";
 // Applied to every route — admin and public alike. Content-Security-Policy
 // is deliberately NOT set here: it needs a fresh nonce per request so
 // script-src can stay strict while still allowing Next.js's own hydration
-// scripts, which only works set dynamically — see src/middleware.ts. Setting
-// it both here (static) and in middleware (dynamic) would send two
+// scripts, which only works set dynamically — see src/proxy.ts. Setting
+// it both here (static) and in the proxy (dynamic) would send two
 // CSP headers, and browsers enforce the *intersection* of multiple CSP
 // headers — the static one's un-nonced `script-src 'self'` would silently
 // override the nonce and break hydration again.

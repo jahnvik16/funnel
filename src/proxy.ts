@@ -7,7 +7,7 @@ import { NextResponse, type NextRequest } from "next/server";
 // under the App Router, not a custom convention. Confirmed live: a static
 // `script-src 'self'` (set from next.config.ts instead) blocked Next's own
 // inline hydration scripts outright and broke the app.
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   // Set once here (rather than lazily per log call — see
   // lib/request-context.ts) so every Server Component/Action/route handler
   // downstream of this single incoming request sees the exact same id,
