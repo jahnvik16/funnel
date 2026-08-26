@@ -8,7 +8,14 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // The running app always connects through this URL, which in production is
+  // expected to be a pooled connection (e.g. PgBouncer/Neon's pooler) — a
+  // serverless deployment opens far more concurrent connections than a
+  // traditional long-lived server would. `directUrl` below is used only by
+  // the Prisma CLI (migrate/db push/studio), which needs a direct connection
+  // a pooler can't support. See docs/funnelcore/VERCEL_DEPLOYMENT.md.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 // ---------------------------------------------------------------------------

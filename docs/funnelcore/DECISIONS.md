@@ -742,3 +742,63 @@ Added `src/app/error.tsx` (client-rendered error boundary for admin/gate/path pa
 unexpected render error shows a plain "something went wrong" page instead of a raw framework
 crash screen -- the same class of problem D042's NUL-byte crash was, but as a general safety net
 rather than a fix for one specific input.
+
+## D054 -- `middleware.ts` renamed to `proxy.ts`
+**Date:** 2026-08-26
+Next.js 16 deprecated the `middleware` file convention in favor of `proxy` (same behavior,
+renamed to avoid confusion with Express-style middleware); `npm run build` had started emitting
+a deprecation warning. Migrated using exactly the scope Next's own codemod
+(`@next/codemod middleware-to-proxy`) performs: renamed `src/middleware.ts` to `src/proxy.ts`
+and the exported function from `middleware` to `proxy` -- nothing else in the file changed. One
+stale comment in `next.config.ts` referencing the old path was corrected to point at the new
+one. No change to the nonce-based CSP (D045), request-ID generation, or auth/session handling --
+verified live: all 5 security headers and the nonce-bearing CSP still present, a real login
+still reached the authenticated dashboard, and an unauthenticated request to `/admin` still
+redirected to `/admin/login`. `npm test`/`lint`/`typecheck`/`build` all still pass; the
+deprecation warning is gone from the build output.
+
+## D055 -- Vercel deployment preparation: pooled vs. direct database connections
+**Date:** 2026-08-26
+Preparing for the first real deployment (target: Vercel) surfaced a connection-handling gap
+that only matters once the app runs as short-lived serverless functions rather than one
+long-running local process: many concurrent function invocations can each open their own
+Postgres connection, which a traditional pooled long-running server never does at the same
+rate, and can exhaust a normal (non-pooled) Postgres connection limit under real traffic.
+Prisma's documented answer is a second, direct connection string reserved for the CLI's
+migration commands, which need session-level features most poolers (transaction-mode PgBouncer
+in particular) don't support -- `prisma/schema.prisma`'s `datasource` block now declares
+`directUrl = env("DIRECT_DATABASE_URL")` alongside the existing `url = env("DATABASE_URL")`.
+The generated Prisma Client -- and therefore every code path in the running app -- continues to
+read only `DATABASE_URL`; `DIRECT_DATABASE_URL` is read only by Prisma CLI commands
+(`migrate deploy`/`dev`, `studio`), confirmed by testing that `prisma generate` succeeds even
+with `DIRECT_DATABASE_URL` unset entirely. In any environment with a single, unpooled Postgres
+instance (this project's local docker-compose setup included), both variables are simply the
+same value -- the split only does something once a real pooler is in front of `DATABASE_URL`.
+
+Also added: a `postinstall` script (`prisma generate`) so the Prisma Client is always
+regenerated after install, matching Prisma's documented guidance for platforms (Vercel
+included) that cache `node_modules` between builds; a `prisma:migrate:deploy` script as a named
+alias for `prisma migrate deploy`; an `engines.node: ">=20.9.0"` field in package.json matching
+Next.js 16's actual minimum, so a host that reads `engines` (Vercel does) selects a compatible
+Node runtime automatically; and a `vercel.json` with an explicit `buildCommand`
+(`npm run prisma:migrate:deploy && npm run build`) using Vercel's documented `buildCommand`
+override rather than the older, no-longer-documented `vercel-build` script-name convention some
+older guides still reference. The plain `build` script (`next build`) is deliberately left
+unchanged, so local and CI builds behave exactly as before this milestone; only Vercel's
+build step runs migrations first.
+
+Verified end-to-end against a freshly created, empty scratch Postgres database (never the real
+dev database, and never any production database): `prisma migrate deploy` applied all 8
+existing migrations cleanly in order, followed by a full `next build` against that same
+database, exactly reproducing what `vercel.json`'s `buildCommand` will run on a real deploy. The
+scratch database was dropped immediately after verification. No production database was touched
+or seeded as part of this work -- seeding remains an explicit, manual, one-time step (see
+docs/funnelcore/VERCEL_DEPLOYMENT.md §6), never wired into an automated build/deploy path,
+specifically because the seed script's `upsert` would otherwise silently reset the admin
+password back to `SEED_ADMIN_PASSWORD` on every redeploy.
+
+No business logic, architecture, routing, or public-route behavior changed -- this is
+connection-string and build-configuration plumbing only. See
+docs/funnelcore/VERCEL_DEPLOYMENT.md for the full deployment guide and
+docs/funnelcore/PRODUCTION_READINESS.md §§2-3 for the updated platform-agnostic checklist and
+environment variable table.

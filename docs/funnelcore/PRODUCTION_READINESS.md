@@ -23,7 +23,7 @@ row-by-row CSV import are all unchanged from V1.
 | Timing-safe login (no email-enumeration via response time) | ✅ Done (V1, D036) | |
 | Login rate limiting / account lockout | ✅ Done (this milestone, D044) | 5 failed attempts locks an account 15 minutes; DB-backed so it survives restarts and works across instances |
 | Security response headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, `Strict-Transport-Security`) | ✅ Done (this milestone, D045) | Static, via `next.config.ts` |
-| Content-Security-Policy | ✅ Done (this milestone, D045) | Nonce-based via `src/middleware.ts`, not static — a static CSP broke Next.js hydration (see D045). `'unsafe-eval'` only outside production |
+| Content-Security-Policy | ✅ Done (this milestone, D045) | Nonce-based via `src/proxy.ts` (renamed from `middleware.ts`, D054 — same behavior), not static — a static CSP broke Next.js hydration (see D045). `'unsafe-eval'` only outside production |
 | Startup validation of `ENCRYPTION_KEY` / required env vars | ✅ Done (this milestone, D046) | Fails loud at boot via `src/instrumentation.ts`, not lazily on first use |
 | Webhook secret verification (Telegram) | ✅ Done (V1, D035) | Constant-time comparison; permissive until a secret is registered |
 | CSRF | ✅ Inherent | All mutations are Next.js Server Actions (same-origin POST only, framework-enforced) — no separate CSRF token needed |
@@ -35,19 +35,32 @@ row-by-row CSV import are all unchanged from V1.
 
 ## 2. Deployment checklist
 
-1. Provision PostgreSQL 16+, reachable from the app at boot.
+Platform-agnostic checklist. **For Vercel specifically, see
+[VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md) for the exact `vercel.json`/environment-variable
+configuration** — this section stays generic since FunnelCore isn't tied to one host.
+
+1. Provision PostgreSQL 16+, reachable from the app at boot. In any deployment where the app
+   runs as short-lived/serverless functions (Vercel included), the app's own connection
+   (`DATABASE_URL`) must be a **pooled** connection (PgBouncer, or your provider's built-in
+   pooler — Neon and Supabase both provide one) — see D055. Migrations need a separate
+   **direct** connection (`DIRECT_DATABASE_URL`) instead; see prisma/schema.prisma's
+   `directUrl` field.
 2. Set all required environment variables (§3) — a freshly generated `ENCRYPTION_KEY`
    (`openssl rand -base64 32`), never the local dev value.
-3. Run `npx prisma migrate deploy` (not `migrate dev`, which requires an interactive terminal).
-   There are 8 migrations as of this milestone; confirm the most recent two applied via
-   `\d admin_users` (expect `failedLoginAttempts`/`lockedUntil` columns) and `\d clicks`
-   (expect `clicks_brandId_idx`/`clicks_platformId_idx`/`clicks_socialAccountId_idx`).
-4. Run `npx prisma generate` if not already run as part of the build.
+3. Run `npm run prisma:migrate:deploy` (i.e. `prisma migrate deploy` — not `migrate dev`, which
+   requires an interactive terminal), pointed at `DIRECT_DATABASE_URL`. There are 8 migrations
+   as of this milestone; confirm the most recent two applied via `\d admin_users` (expect
+   `failedLoginAttempts`/`lockedUntil` columns) and `\d clicks` (expect
+   `clicks_brandId_idx`/`clicks_platformId_idx`/`clicks_socialAccountId_idx`).
+4. Run `npx prisma generate` if not already run as part of install (the `postinstall` script
+   does this automatically as of D055 — see package.json).
 5. Run `npm run build`, then start with `npm run start` (or your platform's Next.js production
    entrypoint) — confirm `instrumentation.ts` runs (a malformed `ENCRYPTION_KEY` will crash the
    boot immediately with a named error; see §8's smoke test).
-6. Run `npm run prisma:seed` once to create the first admin account, then change that password
-   after first login.
+6. Run `npm run prisma:seed` once, manually, to create the first admin account — **never as
+   part of an automated build/deploy step**, since the seed's `upsert` would otherwise silently
+   reset the admin's password back to `SEED_ADMIN_PASSWORD` on every redeploy. Change that
+   password after first login.
 7. Point a real public HTTPS hostname at the deployment before registering the Telegram
    webhook — `setWebhook` will not succeed against `http://localhost` or a non-public URL.
 8. Confirm `GET /api/health` returns `200 {"status":"ok","database":"connected"}`.
@@ -57,14 +70,17 @@ row-by-row CSV import are all unchanged from V1.
 
 | Variable | Required | Purpose | Notes |
 |---|---|---|---|
-| `DATABASE_URL` | Yes | Postgres connection string | Validated at startup (D046); app refuses to boot without it |
+| `DATABASE_URL` | Yes | Postgres connection string the **running app** uses for every query | Validated at startup (D046); app refuses to boot without it. **Must be a pooled connection in any serverless/short-lived-process deployment** (D055) — see §2 |
+| `DIRECT_DATABASE_URL` | Yes, for migrations | Direct (unpooled) Postgres connection used only by the Prisma CLI (`migrate deploy`/`dev`, `studio`) — see `directUrl` in prisma/schema.prisma | Not read by the running application at all (D055); `prisma generate` does not require it either, only actual migration commands do. In local dev (a single, unpooled Postgres instance) this is identical to `DATABASE_URL` |
 | `ENCRYPTION_KEY` | Yes | AES-256-GCM key for Telegram tokens/API credentials | Base64-encoded, must decode to exactly 32 bytes — validated at startup (D046), not just on first use. No rotation mechanism (see §7) |
-| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | Yes, once | First admin account via `prisma db seed` | Password must be 8+ characters; the seed is an upsert, safe to re-run |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | Yes, once | First admin account via `prisma db seed` | Password must be 8+ characters; the seed is an upsert, safe to re-run manually — but never wire it into an automated deploy step (see §2 item 6) |
 | `APP_BASE_URL` | Strongly recommended | Public base URL for Telegram webhook registration and in-chat CTA links | Not enforced at startup (soft warning only, D046) since local dev has a working fallback — but Telegram integration will not function correctly without the real public HTTPS value in production |
 | `PAYBIG_API_BASE_URL` / `PAYBIG_API_KEY` / `PAYBIG_WEBHOOK_SECRET` | No | Reserved for a future live Paybig integration | **Currently unused** — V1 ships Paybig conversions as an admin-uploaded CSV (ratified as staying CSV-only this milestone, D043.5). Do not treat as required |
 
 Real Telegram bot tokens and any real Paybig API credentials are entered through the admin UI
-(encrypted at rest immediately), never via environment variables or committed files.
+(encrypted at rest immediately), never via environment variables or committed files. None of
+the variables above are hardcoded anywhere in the codebase — every one is read via
+`process.env`/`env()` at the point of use.
 
 ## 4. Monitoring checklist
 
@@ -84,7 +100,7 @@ Real Telegram bot tokens and any real Paybig API credentials are entered through
     `duplicates`, `statusUpdated`, `invalidCount`, `unmatchedCount`; a high `invalidCount` or
     `unmatchedCount` on an import may indicate Paybig's export format has drifted.
 - **Request correlation**: every request carries an `x-request-id` (generated in
-  `src/middleware.ts` if not already present upstream, D053) and every log line from that
+  `src/proxy.ts` if not already present upstream, D053) and every log line from that
   request's handling shares it — use it to trace one request's full log trail. Note this is
   distinct from `Click.id`, which correlates one visitor's journey *across* the separately
   issued `/l → /gate → /path → /out` requests.
@@ -181,11 +197,6 @@ remains open (see OPEN_QUESTIONS.md for full reasoning on each):
 - **No CSV-import audit-trail atomicity.** The audit-log row is written once, after all rows
   are processed, as a separate statement — a crash between the last row committing and that
   write leaves the import's data correct but its audit-trail entry missing.
-- **`src/middleware.ts` uses a file convention Next.js 16 marks deprecated in favor of
-  `proxy.ts`** (`npm run build` emits this as a warning, not an error — the app builds and runs
-  correctly today). Not renamed in this milestone since it's an unrelated mechanical change with
-  its own migration tooling (`npx @next/codemod@canary middleware-to-proxy`); worth doing as its
-  own small change before the underlying `middleware.ts` support is actually removed.
 
 ## 8. Production smoke tests
 
