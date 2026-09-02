@@ -1,5 +1,8 @@
 "use server";
 
+import { randomUUID } from "crypto";
+import { headers } from "next/headers";
+import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { redirect } from "next/navigation";
 import { Prisma, PathType, LinkStatus } from "@prisma/client";
@@ -11,6 +14,9 @@ import {
   publishTrackingLinkVersion as publishTrackingLinkVersionCore,
   type ValidationIssue,
 } from "@/lib/tracking-link-publishing";
+import { importTrackingLinksCsv, type BulkImportSummary } from "@/lib/tracking-link-bulk-import";
+import { logger } from "@/lib/logger";
+import { getOrCreateRequestId } from "@/lib/request-context";
 
 export type FormState = { error?: string };
 
@@ -265,4 +271,62 @@ export async function publishTrackingLinkVersion(
   }
 
   redirect(`/admin/tracking-links/${parsed.input.trackingLinkId}`);
+}
+
+// --- Bulk import (CSV) -------------------------------------------------------
+
+export type BulkImportFormState = { error?: string; summary?: BulkImportSummary };
+
+// Same reasoning/limit as conversions/actions.ts's importConversionsCsv —
+// generous for a config-setup CSV (dozens to low hundreds of rows), while
+// still rejecting an unbounded upload upfront rather than tying up the
+// request (and a transaction per row) for an unbounded amount of time.
+const MAX_CSV_BYTES = 10 * 1024 * 1024; // 10 MB
+
+export async function bulkImportTrackingLinks(
+  _prevState: BulkImportFormState,
+  formData: FormData,
+): Promise<BulkImportFormState> {
+  const admin = await requireAdmin();
+
+  const file = formData.get("csvFile");
+  if (!(file instanceof File) || file.size === 0) {
+    return { error: "Choose a CSV file to import." };
+  }
+  if (file.size > MAX_CSV_BYTES) {
+    return { error: `File is too large (${Math.round(file.size / 1024 / 1024)} MB) — the limit is 10 MB.` };
+  }
+
+  const requestId = getOrCreateRequestId(await headers());
+  const content = await file.text();
+  const summary = await importTrackingLinksCsv(prisma, content, admin.id);
+
+  // One audit row for the batch itself, on top of the per-row Campaign/
+  // TrackingLink/PUBLISH audit rows already written inside importRow — this
+  // one records the import event, the row-level rows record what it did.
+  const entityId = randomUUID();
+  await writeAuditLog(prisma, {
+    actorId: admin.id,
+    action: "IMPORT",
+    entityType: "TrackingLinkBulkImport",
+    entityId,
+    after: { totalRows: summary.totalRows, created: summary.created, skippedExisting: summary.skippedExisting },
+  });
+
+  logger.info("tracking_link_bulk_import_completed", {
+    requestId,
+    importId: entityId,
+    adminUserId: admin.id,
+    totalRows: summary.totalRows,
+    created: summary.created,
+    skippedExisting: summary.skippedExisting,
+    campaignsCreated: summary.campaignsCreated,
+    campaignsReused: summary.campaignsReused,
+    invalidCount: summary.invalid.length,
+  });
+
+  revalidatePath("/admin/tracking-links");
+  revalidatePath("/admin/campaigns");
+
+  return { summary };
 }

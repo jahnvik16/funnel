@@ -802,3 +802,49 @@ connection-string and build-configuration plumbing only. See
 docs/funnelcore/VERCEL_DEPLOYMENT.md for the full deployment guide and
 docs/funnelcore/PRODUCTION_READINESS.md §§2-3 for the updated platform-agnostic checklist and
 environment variable table.
+
+## D056 -- Bulk CSV import for Campaigns + Tracking Links
+**Date:** 2026-09-02
+A real Paybig export for a pilot campaign covered 7 brands x 12 platform/campaign combinations
+(84 Campaigns, 84 Tracking Links) -- creating each one by hand through the admin UI, one form
+submission at a time, was the actual bottleneck standing between having the data and having a
+working funnel, not anything about FunnelCore's model itself. The 84-row shape happened to map
+cleanly onto what already exists (see docs/funnelcore/PRODUCT_SPEC.md/DATA_MODEL.md): every
+Paybig campaign in that export is used by exactly one Tracking Link, so campaign-level Paybig
+attribution (D027/D028's known "no click-level attribution" limitation) is not actually a
+limitation for this shape of data -- it was worth building bulk-creation tooling, not new
+attribution capability.
+
+`src/lib/tracking-link-bulk-import.ts` adds `importTrackingLinksCsv`, parsing a CSV (reusing
+`parseCsv` from `lib/paybig-import.ts` rather than a second tokenizer) where each row describes
+one Campaign + one Tracking Link, then calls the *exact same* `publishTrackingLinkVersion` core
+function the admin UI's Publish button calls (`lib/tracking-link-publishing.ts`) -- deliberately
+not a second, parallel way to create a tracking link with its own validation rules that could
+drift from the manual path. Row-by-row, one transaction per row (not one for the whole file, and
+not the framework-independent single-transaction-client signature `lib/paybig-import.ts` uses --
+a row here is Campaign + TrackingLink + TrackingLinkVersion, three writes that must succeed or
+fail together, and `Prisma.TransactionClient` has no `$transaction` of its own for nested
+transactions, so this takes the full `PrismaClient` and opens one transaction per row itself).
+
+Brands, Platforms, Domains, and Telegram bots must already exist -- this tool creates Campaigns
+and Tracking Links, not the entities they belong to; those are few enough in practice (7 brands,
+a handful of platforms) that clicking through the admin UI for them once is not the bottleneck
+this exists to remove.
+
+Explicitly protects against the accuracy risk a bulk tool invites: if a CSV row's `campaign_slug`
+matches an existing Campaign whose `paybig_url` differs from the row's, that row is rejected as
+invalid rather than silently overwriting a live campaign's destination from a spreadsheet that
+might itself be wrong or stale -- reported back for a human to resolve, same "never silently
+corrupt data" posture as the rest of this project. Re-running an already-imported file is safe:
+a row whose Tracking Link (domain + token) already exists is reported as skipped, not
+duplicated, so a CSV can be fixed and re-uploaded after a partial failure without hand-picking
+which rows to remove first.
+
+New admin page at `/admin/tracking-links/bulk-import`, linked from the Tracking Links list page
+rather than added to the main nav -- a bulk operation used occasionally, not a section visited
+routinely. See docs/funnelcore/BULK_TRACKING_LINK_IMPORT.md for the CSV format and
+docs/funnelcore/TEST_PLAN.md for coverage. Verified live: the page renders and the real admin
+CRUD/audit-logging/publish pipeline runs underneath it (confirmed via
+`tracking-link-bulk-import.test.ts` against real Postgres, covering the happy path for both
+direct and telegram rows, the paybig_url-mismatch rejection, idempotent re-import, and that one
+invalid row never blocks the rest of the file).

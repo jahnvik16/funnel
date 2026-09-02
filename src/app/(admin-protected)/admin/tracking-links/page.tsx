@@ -21,7 +21,12 @@ export default async function TrackingLinksPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <h1 className={ui.pageTitle}>Tracking links</h1>
+      <div className="flex items-center justify-between">
+        <h1 className={ui.pageTitle}>Tracking links</h1>
+        <Link href="/admin/tracking-links/bulk-import" className={ui.link}>
+          Bulk import (CSV)
+        </Link>
+      </div>
 
       <NewTrackingLinkForm brands={brands} domains={domains} suggestedToken={suggestToken()} />
 

@@ -115,6 +115,29 @@ without a database):
   **ambiguous**: a slug shared by two brands' campaigns is treated as unmatched with reason
   `ambiguous` rather than guessed (D028), also with `campaignId` left null.
 
+`src/lib/tracking-link-bulk-import.test.ts` covers the bulk Campaign + Tracking Link CSV import
+(D056), real Postgres, one test per behavior rather than one giant fixture — see
+docs/funnelcore/BULK_TRACKING_LINK_IMPORT.md for the CSV format itself:
+- A valid `direct` row creates and publishes a Campaign + Tracking Link in one pass.
+- A valid `telegram` row requires a validated bot and publishes with the snapshot's destination
+  coming from `campaign.paybigUrl`, not a `destinationUrl` (matching D019's existing telegram
+  `/out` behavior, unchanged by this feature).
+- **Idempotent re-import**: importing the same file twice creates the tracking link once —
+  the second run reports it as skipped, never duplicated.
+- **Accuracy protection (the core guarantee this tool exists to preserve)**: a row whose
+  `campaign_slug` matches an existing campaign with a *different* `paybig_url` is rejected as
+  invalid, and the existing campaign's `paybigUrl` is asserted unchanged afterward — a bulk tool
+  must never silently overwrite a live campaign's destination.
+- A row matching an existing campaign with the *same* `paybig_url` reuses it — asserted via the
+  summary's `campaignsReused` count (not `campaignsCreated`), and via the created row's
+  `campaignId` matching the pre-existing campaign's id exactly.
+- **Row independence**: one invalid row (an unknown `brand_slug`) never blocks a valid row
+  elsewhere in the same file — both are asserted from a single two-row CSV.
+- Telegram-specific validation: a row missing `telegram_bot_name` and a row naming a real but
+  unvalidated bot are both rejected, with reasons distinguishing the two cases.
+- An unrecognized `path_type` and an invalid `destination_url` are each rejected, quoting the
+  actual offending value back in the reason.
+
 `src/lib/attribution-report.test.ts` covers the dashboard's aggregation logic against a real
 fixture (brand, two campaigns — one flagged `isDefault` — a social account, an experiment/arm,
 two published tracking-link versions of different path types, two clicks with distinct funnel
