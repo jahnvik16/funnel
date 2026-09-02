@@ -848,3 +848,35 @@ CRUD/audit-logging/publish pipeline runs underneath it (confirmed via
 `tracking-link-bulk-import.test.ts` against real Postgres, covering the happy path for both
 direct and telegram rows, the paybig_url-mismatch rejection, idempotent re-import, and that one
 invalid row never blocks the rest of the file).
+
+## D057 -- `/admin/login` forced dynamic: a static page can never carry a per-request CSP nonce
+**Date:** 2026-09-02
+Found while checking the real Vercel deployment after D056 shipped -- unrelated to that change,
+but real and live: every script on `/admin/login` was being blocked by the browser, confirmed via
+curl against production. `Content-Security-Policy`'s nonce (generated fresh per request by
+`src/proxy.ts`, D045) never matched the nonce baked into the page's actual HTML, because
+`/admin/login` had no dynamic data dependency and Next.js silently static-optimized it --
+confirmed via `X-Vercel-Cache: HIT` and a different nonce in the CSP header on every repeated
+request against the same cached HTML. A statically prerendered/cached page is generated once and
+reused for many requests, each of which gets its own fresh nonce from the proxy; the two are
+structurally incompatible; and nothing in local `next dev`/`next start` testing (throughout D045
+and every milestone since) ever exercised a real CDN caching layer the way Vercel's edge network
+does, so this never surfaced until checked against the real deployment.
+
+The practical impact was degraded, not a hard outage -- the login `<form>`'s native POST still
+reached the server-action handler without any client JS, so login itself kept working -- but
+every client-side behavior on that page (the pending-state button, inline error display without
+a full reload) was silently broken, and any other page that ended up static-optimized the same
+way would have the identical failure.
+
+Fixed by forcing the route to always render dynamically (`export const dynamic =
+"force-dynamic"`), which only a Server Component file can declare -- `page.tsx` was a `"use
+client"` component itself, so the fix also splits it into a thin Server Component `page.tsx`
+(route config only) rendering the actual form from a new `LoginForm.tsx` client component,
+matching the server-page/client-form split already used everywhere else in this codebase
+(`ImportCsvForm.tsx`, `BulkImportForm.tsx`, etc.) -- this page was the one place that pattern
+hadn't been applied. Confirmed via the build output that `/admin/login` now reports `ƒ`
+(Dynamic) instead of `○` (Static); `/` stays static deliberately -- it has no forms or client
+state, so a stale nonce there blocks nothing that matters (Next's `<Link>` still renders a plain
+navigable `<a href>` without JS). No change to the CSP policy itself, the nonce generation logic,
+routing, or auth/session handling.

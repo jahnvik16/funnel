@@ -84,6 +84,14 @@ the variables above are hardcoded anywhere in the codebase — every one is read
 
 ## 4. Monitoring checklist
 
+- **New page, no forms/client state → check it isn't accidentally static (D057).** Any new
+  route with no dynamic data dependency can get silently static-optimized by Next.js, which is
+  incompatible with the nonce-based CSP (D045) — a real request only surfaces this against an
+  actual CDN layer (confirmed on Vercel via `curl -sD - <url> | grep -E "X-Vercel-Cache|nonce"`:
+  `X-Vercel-Cache: HIT` plus a *different* nonce on repeated requests means it's broken), not
+  against local `next dev`/`next start`. If a new page needs to stay interactive, give it
+  `export const dynamic = "force-dynamic"` from a Server Component file — see `/admin/login`'s
+  `page.tsx`/`LoginForm.tsx` split for the pattern when the page itself is a Client Component.
 - **Liveness/readiness**: poll `GET /api/health`. Returns `200 {"status":"ok","database":"connected"}`
   when healthy, `503 {"status":"degraded","database":"unreachable"}` when Postgres is unreachable
   (D047 — previously always returned 200 regardless of DB state). Point your platform's health
