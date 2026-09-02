@@ -349,7 +349,15 @@ export async function importTrackingLinksCsv(
 
     let result: BulkImportRowResult;
     try {
-      result = await db.$transaction((tx) => importRow(tx, parsed.data, rowNumber, actorId));
+      // A single row does several sequential lookups plus a full publish
+      // (which itself re-validates everything) -- comfortably under
+      // Prisma's 5s interactive-transaction default on a fast connection,
+      // but found via live verification to be too tight under real-world
+      // latency to a pooled Postgres provider. 20s gives real headroom
+      // without masking a genuinely stuck row forever.
+      result = await db.$transaction((tx) => importRow(tx, parsed.data, rowNumber, actorId), {
+        timeout: 20_000,
+      });
     } catch (error) {
       const reason =
         error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"

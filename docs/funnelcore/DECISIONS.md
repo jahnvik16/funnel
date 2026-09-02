@@ -880,3 +880,35 @@ hadn't been applied. Confirmed via the build output that `/admin/login` now repo
 state, so a stale nonce there blocks nothing that matters (Next's `<Link>` still renders a plain
 navigable `<a href>` without JS). No change to the CSP policy itself, the nonce generation logic,
 routing, or auth/session handling.
+
+## D058 -- Bulk import per-row transaction timeout raised from Prisma's 5s default to 20s
+**Date:** 2026-09-02
+Found live-testing D056 directly against the real production database (user-authorized:
+throwaway "ZZ TEST -- DELETE ME" brand/platform/domain, real bulk import, real `/l/{token}`
+request against the actual public route, full cleanup after -- not a permanent change to
+production data). The row failed with `Transaction API error: Transaction already closed` --
+Prisma's interactive-transaction default timeout is 5 seconds, and a single row's transaction
+(brand/platform/domain/campaign/social-account/telegram-bot lookups, then the full
+`publishTrackingLinkVersion` re-validation and writes) is enough sequential round-trips that a
+slower-than-ideal connection to the database can exceed it. Measured a single bare query from
+this environment to the production Neon instance at ~2.3 seconds round-trip -- confirming this
+was latency-bound, not a logic bug, and unlikely to reproduce from Vercel's own servers (same
+broad US region as the database) the way it did from this sandbox.
+
+Raised anyway, to 20 seconds, rather than leaving the default: real production traffic can still
+see elevated latency (a cold Neon compute, connection pool contention under a large real import),
+and the entire point of this tool is reliability at volume -- a row spuriously failing because of
+a tight timeout, on a database provider explicitly chosen for serverless deployment (D055), is
+exactly the kind of failure this feature exists to prevent, not something to leave a 5-second
+default exposed to. Re-ran the same row after the change and it succeeded; the failed first
+attempt correctly left no partial data (Prisma rolls back a timed-out interactive transaction),
+confirmed by checking the database directly before retrying.
+
+Also confirmed live, end to end, against the real deployed site: the created Tracking Link's
+public URL resolved through the full `/l` -> `/path` -> `/out` chain and redirected to the
+correct campaign destination, with `Click` and `FunnelEvent` (`ROUTE_RESOLVED`, then
+`OUTBOUND_PAYBIG_REDIRECTED` with the right `destinationUrl`) rows created exactly as designed --
+the first time this milestone's D056 feature had been proven against a real deployment rather
+than only the local integration test suite. All test fixtures (brand, platform, domain, campaign,
+tracking link, version, clicks, funnel events) were deleted immediately after, and their absence
+was verified by querying for each one directly before finishing.
